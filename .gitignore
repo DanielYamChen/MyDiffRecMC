@@ -1,0 +1,43 @@
+/data/nerf_synthetic/*
+# /data/custom/defocus_matrices/*
+/out/*
+/data/experiment/*
+/data/sim_scenes/*
+/data/custom/*
+*.pyc
+*.pt
+*.ckpt
+/out/custom_v3_step1
+/out/custom_v3_step2
+out/custom_v6_step1/dmtet_mesh/mesh.obj
+out/custom_v6_step1/dmtet_mesh/untitled.obj
+out/custom_v6_step1/mesh/mesh.obj
+out/custom_v6_step2/mesh/mesh.obj
+out/custom_v7_step1/dmtet_mesh/mesh.obj
+out/custom_v7_step1/dmtet_mesh/untitled.obj
+out/custom_v7_step1/mesh/mesh.obj
+out/custom_v7_step2/mesh/mesh.obj
+out/custom_v8_step1/dmtet_mesh/mesh.obj
+out/custom_v8_step1/mesh/mesh.obj
+untitled.blend
+untitled.blend1
+# data/experiment/*
+# out/experiment_trial/*
+out/custom_test/*
+data/tets/512_tets.npz
+out/experiment_trial/config.json
+out/experiment_trial_all/*
+out/experiment_trial_no_camera_test/*
+out/sim_scenes_trial/*
+# out/sim_scenes_2/*
+# out/sim_scenes_2_wo_camera/*
+# out/sim_scenes_2_wo_defocus_blur/*
+# out/sim_scenes_3/*
+# out/sim_scenes_3_wo_camera/*
+# out/sim_scenes_3_wo_defocus_blur/*
+# out/sim_scenes_3_wo_expsr_related/*
+out/experiment_trial_v2_old/*
+out/experiment_trial_wo_camera_v2_old/*
+# out/experiment/*
+# out/experiment_wo_camera/*
+# out/experiment_wo_defocus_blur/*

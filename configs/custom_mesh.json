@@ -1,0 +1,22 @@
+{
+    "ref_mesh": "data/custom/custom_oracle.obj",
+    "base_mesh": "data/custom/custom_base_mesh.obj",
+    "random_textures": true,
+    "iter": 400,
+    "save_interval": 100,
+    "texture_res": [1024, 1024],
+    "train_res": [384, 512],
+    "batch_size": 4,
+    "learning_rate": [0.010, 0.002],
+    "ks_min" : [0, 0.1, 0.0],
+    "ks_max" : [0, 1.0, 1.0],
+    "envlight": "data/custom/envmaps/envmap_000_000.hdr",
+    "validate" : false,
+    "lock_pos" : true,
+    "display": [{"latlong" : true}],
+    "background" : "white",
+    "denoiser": "bilateral",
+    "n_samples" : 4,    
+    "out_dir": "custom_w_mesh",
+    "add_phys_cam": true
+}
