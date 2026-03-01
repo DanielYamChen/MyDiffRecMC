@@ -83,56 +83,59 @@ def GetGaussianMask(img_h, img_w, kernel_size, center):
     return mask
     
 
-def GetDefocusWeights(img_h, img_w, kernel_size, px_idx):
-    """
-    return the weights and their indices in the defocus sparse matrix
+# def GetDefocusWeights(img_h, img_w, kernel_size, px_idx):
+#     """
+#     return the weights and their indices in the defocus sparse matrix
     
-    Parameters
-    ----------
-    img_h : int
-        image height, [px]
-    img_w : int
-        image width, [px]
-    kernel_size : int
-        side length of the Gaussian kernel, must be an odd number, [px]
-    px_idx : int
-        index of the pixel
-    """
+#     Parameters
+#     ----------
+#     img_h : int
+#         image height, [px]
+#     img_w : int
+#         image width, [px]
+#     kernel_size : int
+#         side length of the Gaussian kernel, must be an odd number, [px]
+#     px_idx : int
+#         index of the pixel
+#     """
     
-    # mask = torch.zeros((img_h, img_w), dtype=torch.float32)
+#     # mask = torch.zeros((img_h, img_w), dtype=torch.float32)
     
-    kernel = GetGaussianKernel(kernel_size, kernel_size / 6.0)
-    half_k_size = kernel_size // 2
-    y_c = px_idx // img_w
-    x_c = px_idx % img_w
+#     kernel = GetGaussianKernel(kernel_size, kernel_size / 6.0)
+#     half_k_size = kernel_size // 2
+#     y_c = px_idx // img_w
+#     x_c = px_idx % img_w
 
-    y_min = max(0, y_c - half_k_size)
-    y_max = min(img_h, y_c + half_k_size + 1)
-    x_min = max(0, x_c - half_k_size)
-    x_max = min(img_w, x_c + half_k_size + 1)
+#     y_min = max(0, y_c - half_k_size)
+#     y_max = min(img_h, y_c + half_k_size + 1)
+#     x_min = max(0, x_c - half_k_size)
+#     x_max = min(img_w, x_c + half_k_size + 1)
     
-    k_y_min = half_k_size - (y_c - y_min) # ??
-    k_y_max = kernel_size - (half_k_size - (y_max - y_c - 1)) # ??
-    k_x_min = half_k_size - (x_c - x_min) # ??
-    k_x_max = kernel_size - (half_k_size - (x_max - x_c - 1)) # ??
+#     k_y_min = half_k_size - (y_c - y_min) # ??
+#     k_y_max = kernel_size - (half_k_size - (y_max - y_c - 1)) # ??
+#     k_x_min = half_k_size - (x_c - x_min) # ??
+#     k_x_max = kernel_size - (half_k_size - (x_max - x_c - 1)) # ??
     
-    indices_in = img_w * np.arange(y_min, y_max) + np.arange(x_min, x_max)
-    values = kernel[k_y_min : k_y_max, k_x_min : k_x_max].reshape(-1)
+#     indices_in = img_w * np.arange(y_min, y_max) + np.arange(x_min, x_max)
+#     values = kernel[k_y_min : k_y_max, k_x_min : k_x_max].reshape(-1)
     
-    return indices_in, values
+#     return indices_in, values
 
 
 @cuda.jit
-def CudaGetDefocusWeightsKernel(img_h, img_w, kernel_size_flatten, indices_in, indices_out, values):
+def CudaGetDefocusWeightsKernel(img_h, img_w, kernel_size_flatten, prefix_sum, indices_in, indices_out, values, kernel_type_int):
     
     ## version 2.0 ##
     num_px = img_w * img_h
     px_idx = cuda.grid(1) # index of input pixel
+    idx_offset = prefix_sum[px_idx] # offset for storing the weights and indices of the current pixel in the output arrays
+
     if (px_idx < num_px):
         kernel_size = kernel_size_flatten[px_idx]
         if (kernel_size > 1):
             sigma = kernel_size / 6.0
             half_k_size = kernel_size // 2
+            squared_k_size = kernel_size * kernel_size
             
             x_in = px_idx % img_w
             y_in = px_idx // img_w
@@ -146,18 +149,23 @@ def CudaGetDefocusWeightsKernel(img_h, img_w, kernel_size_flatten, indices_in, i
             append_idx = 0
             for y_out in range(y_min, y_max + 1):
                 for x_out in range(x_min, x_max + 1):
-                    if (append_idx < indices_in.shape[1]):
-                        indices_in[px_idx, append_idx] = px_idx
-                        indices_out[px_idx, append_idx] = y_out * img_w + x_out
-                        values[px_idx, append_idx] = np.float16(
-                            math.exp(-0.5 * ((y_in - y_out)**2 + (x_in - x_out)**2) / sigma**2) / (2.0 * pi * sigma**2)
-                        )
+                    if (append_idx < squared_k_size):
+                        indices_in[idx_offset + append_idx] = px_idx
+                        indices_out[idx_offset + append_idx] = y_out * img_w + x_out
+                        if (kernel_type_int == 1):
+                            values[idx_offset + append_idx] = np.float16(
+                                math.exp(-0.5 * ((y_in - y_out)**2 + (x_in - x_out)**2) / sigma**2) / (2.0 * pi * sigma**2)
+                            )
+                        
+                        elif (kernel_type_int == 2):
+                            values[idx_offset + append_idx] = np.float16(1.0 / (kernel_size * kernel_size))
+                        
                         append_idx += 1
             
         else: # singularity value of the Gaussian blur formula when kernel_size = 1
-            indices_in[px_idx, 0] = px_idx
-            indices_out[px_idx, 0] = px_idx
-            values[px_idx, 0] = 1.0
+            indices_in[idx_offset] = px_idx
+            indices_out[idx_offset] = px_idx
+            values[idx_offset] = 1.0
             
     
     ## version 1.0 ##
@@ -352,7 +360,7 @@ class PhysDiffCamera(nn.Module):
         self.vignet_mask.requires_grad = False
 
     
-    def GetSparseTensor(self, depth_map, camera_config):
+    def GetSparseTensor(self, depth_map: np.ndarray, camera_config: dict, kernel_type: str) -> tuple[torch.sparse.FloatTensor, np.ndarray]:
         """
         Build defocus-blur layer based on the depth map: part 1
 
@@ -360,8 +368,19 @@ class PhysDiffCamera(nn.Module):
         ----------
         depth_map : np.ndarray(float)
             depth map array with shape (img_height, img_width), [m]
-        camera_config : {"aperture_num", "expsr_time", "ISO", "focal_length", "focus_dist"}, type=Dict
+        
+        camera_config : dict
+            {"aperture_num", "expsr_time", "ISO", "focal_length", "focus_dist"}, type=Dict
+
+        Returns
+        -------
+        sparse_tensor : torch.sparse.FloatTensor
+            the sparse matrix for defocus-blur layer, with shape (num_px, num_px)
+        
+        kernel_size_map : np.ndarray(int)
+            the kernel size map converted from depth map, with shape (img_height, img_width), [px]
         """
+
         assert (self.gain_params['max_CoC'] > 0), "max circle-of-confusion should be larger than 0 ..."
         
         f = camera_config["focal_length"] # [m]
@@ -382,6 +401,9 @@ class PhysDiffCamera(nn.Module):
         valid_px = (depth_flatten > 1e-2)
         kernel_size_flatten[valid_px] = f * f * torch.abs(depth_flatten[valid_px] - U) / (N * C * depth_flatten[valid_px] * (U - f))
         
+        del depth_flatten
+        torch.cuda.empty_cache()
+
         defocus_px = (kernel_size_flatten > b) # those pixels which are out-of-focus
         trans_px = ((1 < kernel_size_flatten) & (kernel_size_flatten <= b)) # those pixels within transition range
         kernel_size_flatten[defocus_px] = a * kernel_size_flatten[defocus_px]
@@ -395,18 +417,34 @@ class PhysDiffCamera(nn.Module):
         
         # print(f"take {np.round(1000 * (time.time() - t_start), 4)} ms to convert depth map to kernel-size map")
         
+        ##########################
+        #### Numba operations ####
+        ##########################
         ## Allocate arrays for indices and values
-        kernel_size_max = max(1, kernel_size_flatten.max().item())
-        indices_in = torch.zeros((num_px, kernel_size_max**2), dtype=torch.int32, device=self.device)
-        indices_out = torch.zeros((num_px, kernel_size_max**2), dtype=torch.int32, device=self.device)
-        values = torch.zeros((num_px, kernel_size_max**2), dtype=torch.float16, device=self.device)
+
+        ## Prefix-sum
+        squared_kernel_sizes = torch.clamp(kernel_size_flatten.to(torch.int64).pow(2), min=1)
+        prefix_sum = torch.cat([
+            torch.zeros(1, dtype=torch.int64, device=self.device),
+            torch.cumsum(squared_kernel_sizes[:-1], dim=0)
+        ], dim=0)
+        prefix_sum = prefix_sum.to(torch.int32)
+        size_indices = int((prefix_sum[-1] + squared_kernel_sizes[-1]).item())
+
+        indices_in  = torch.zeros(size_indices, dtype=torch.int32, device=self.device)
+        indices_out = torch.zeros(size_indices, dtype=torch.int32, device=self.device)
+        values      = torch.zeros(size_indices, dtype=torch.float16, device=self.device)
         
         ## Transfer data to GPU
-        dev_kernel_size_flatten = cuda.as_cuda_array(kernel_size_flatten)
+        # print(f"num_px={num_px}, kernel_size_max={kernel_size_max}, kernel_size_flatten={kernel_size_flatten}")
+        # assert False
+        dev_prefix_sum = cuda.as_cuda_array(prefix_sum)
         dev_indices_in = cuda.as_cuda_array(indices_in)
         dev_indices_out = cuda.as_cuda_array(indices_out)
         dev_values = cuda.as_cuda_array(values)
+        dev_kernel_size_flatten = cuda.as_cuda_array(kernel_size_flatten)
         
+
         # Set up kernel launch parameters
         threads_per_block = 512
         blocks_per_grid = (num_px + threads_per_block - 1) // threads_per_block
@@ -414,14 +452,27 @@ class PhysDiffCamera(nn.Module):
         # Launch the kernel
         # print(f"img_h={img_h}, img_w={img_w}, dev_kernel_size_flatten={kernel_size_flatten}")
         # assert False
+        if (kernel_type == "gaussian"):
+            kernel_type_int = 1
+        elif (kernel_type == "uniform"):
+            kernel_type_int = 2
+        else:
+            assert False, "Unknown kernel type ..."
+
         CudaGetDefocusWeightsKernel[blocks_per_grid, threads_per_block](
-            img_h, img_w, dev_kernel_size_flatten, dev_indices_in, dev_indices_out, dev_values
+            img_h, img_w, dev_kernel_size_flatten, dev_prefix_sum, dev_indices_in, dev_indices_out, dev_values, kernel_type_int
         )
         cuda.synchronize()
-               
+
+        indices_in_cpu  = indices_in.detach().to("cpu")
+        indices_out_cpu = indices_out.detach().to("cpu")
+        values_cpu      = values.detach().to("cpu")
+        del indices_in, indices_out, values, dev_kernel_size_flatten, dev_indices_in, dev_indices_out, dev_values, dev_prefix_sum
+        torch.cuda.empty_cache()
+
         sparse_tensor = torch.sparse_coo_tensor(
-            torch.stack([indices_out.view(-1), indices_in.view(-1)]),
-            values.view(-1),
+            torch.stack([indices_out_cpu.view(-1), indices_in_cpu.view(-1)]),
+            values_cpu.view(-1),
             size=(num_px, num_px), device='cpu', requires_grad=False
         ).coalesce()
         
@@ -437,10 +488,11 @@ class PhysDiffCamera(nn.Module):
         Parameters
         ----------
         sparse_tensor : tensor(float)
-            ...
+        
         batch_img_in : float
             input image tensor with shape (batch_size, img_height, img_width, num_channels), [px]
         """
+        
         t_start = time.time()
         
         ## ...
@@ -464,11 +516,18 @@ class PhysDiffCamera(nn.Module):
             
             # shrink_img: (ch, h, w)
             # print(shrink_img[:, :, 0].view(-1, 1).shape)
+            sp = sparse_tensors[img_idx]
+            if (sp.dtype != shrink_img.dtype):
+                sp = sp.to(dtype=shrink_img.dtype)
+
             for ch_idx in range(batch_img_in.shape[3]):
+                img_out.append(torch.sparse.mm(sp.to(self.device), shrink_img[ch_idx, :, :].view(-1, 1)).view(depth_map_h, depth_map_w))
+            
+            # for ch_idx in range(batch_img_in.shape[3]):
                 
-                img_out.append(torch.sparse.mm(
-                    sparse_tensors[img_idx].float(), shrink_img[ch_idx, :, :].view(-1, 1)
-                ).view(depth_map_h, depth_map_w))
+            #     img_out.append(torch.sparse.mm(
+            #         sparse_tensors[img_idx].float(), shrink_img[ch_idx, :, :].view(-1, 1)
+            #     ).view(depth_map_h, depth_map_w))
 
             # (ch, h, w)
             img_out = torch.stack(img_out, dim=0)
