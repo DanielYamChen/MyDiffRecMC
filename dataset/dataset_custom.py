@@ -80,12 +80,14 @@ class DatasetCustom(Dataset):
         # self.data_dir = "train_imgs/" if "train" in cfg_path else "test_imgs/"
         # self.data_dir = "train_imgs_part2/" if "train" in cfg_path else "test_imgs/"
 
-        # Load config / transforms
+        # Load camera config / transforms
         if (self.dataset_name == "experiment"):
             if ("ground_added" in self.data_dir):
                 self.cfg = json.load(open(cfg_path[:-5] + "_ground_added.json", 'r'))
+            
             elif ("wo_ground" in self.data_dir):
                 self.cfg = json.load(open(cfg_path[:-5] + "_wo_ground.json", 'r'))
+        
         else:
             self.cfg = json.load(open(cfg_path, 'r'))
         
@@ -95,13 +97,16 @@ class DatasetCustom(Dataset):
 
         if (self.dataset_name == "custom"):
             ini_img_path = os.path.join(self.base_dir, self.data_dir, "img0000.png")
+        
         elif (self.dataset_name == "experiment"):
             ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_180_polar_040_azi_000_U_middle_t_0128.png")
+        
         elif (self.dataset_name == "sim_scenes"):
             # ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_000_polar_000_azi_000_U_middle_t_0128.png")
             paths = glob.glob(os.path.join(self.base_dir, self.data_dir, "*.png"))
             paths.sort()
             ini_img_path = paths[0]
+        
         else:
             assert(False), f"dataset_custom.py: unknown dataset name: {self.dataset_name}"
 

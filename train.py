@@ -668,10 +668,12 @@ parser.add_argument('--config', type=str, default=None, help='Config file')
 parser.add_argument('-rm', '--ref_mesh', type=str)
 parser.add_argument('-bm', '--base-mesh', type=str, default=None)
 parser.add_argument('--validate', type=bool, default=True)
-# Render specific arguments
+
+## Render specific arguments
 parser.add_argument('--n_samples', type=int, default=4)
 parser.add_argument('--bsdf', type=str, default='pbr', choices=['pbr', 'diffuse', 'white'])
-# Denoiser specific arguments
+
+## Denoiser specific arguments
 parser.add_argument('--denoiser', default='bilateral', choices=['none', 'bilateral'])
 parser.add_argument('--denoiser_demodulate', type=bool, default=True)
 
