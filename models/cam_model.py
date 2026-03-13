@@ -415,6 +415,9 @@ class PhysDiffCamera(nn.Module):
         kernel_size_flatten = torch.where(kernel_size_flatten % 2 == 1, kernel_size_flatten, kernel_size_flatten + 1)
         kernel_size_flatten = torch.clip(kernel_size_flatten, 1, self.gain_params['max_CoC'])
         
+        ## Remove singularity values at boundaries
+        kernel_size_flatten[kernel_size_flatten >= self.gain_params['max_CoC'] - 2] = 1
+
         # print(f"take {np.round(1000 * (time.time() - t_start), 4)} ms to convert depth map to kernel-size map")
         
         ##########################

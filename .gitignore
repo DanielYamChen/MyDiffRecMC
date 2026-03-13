@@ -1,12 +1,13 @@
 /data/nerf_synthetic/*
 # /data/custom/defocus_matrices/*
-/out/*
+out/*
 /data/experiment/*
 /data/sim_scenes/*
 /data/custom/*
 *.pyc
 *.pt
 *.ckpt
+*.zip
 /out/custom_v3_step1
 /out/custom_v3_step2
 out/custom_v6_step1/dmtet_mesh/mesh.obj

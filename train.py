@@ -24,6 +24,12 @@ import random
 import multiprocessing
 import shutil
 import matplotlib.pyplot as plt
+from datetime import datetime
+
+torch_random_seed = 5678
+torch.manual_seed(torch_random_seed)
+random.seed(torch_random_seed)
+np.random.seed(torch_random_seed)
 
 # Import data readers / generators
 from dataset import DatasetMesh, DatasetNERF, DatasetLLFF, DatasetCustom, InOrderBatchSampler
@@ -582,6 +588,18 @@ def optimize_mesh(
         if ('kd_ks' in opt_material):
             opt_material['kd_ks'].encoder.params.grad /= 8.0
 
+        ## Check for non-finite gradients. If detected, skip this step and zero grad to prevent optimizer from stepping into NaN territory.
+        bad_grad = False
+        for p in trainable_list:
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                bad_grad = True
+                break
+
+        if bad_grad:
+            print(f"[iter {it}] non-finite gradient detected, skip optimizer.step()")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
         # Optionally clip gradients
         if (FLAGS.clip_max_norm > 0.0):
             if (optimize_geometry):
@@ -590,6 +608,28 @@ def optimize_mesh(
                 torch.nn.utils.clip_grad_norm_(trainable_list, FLAGS.clip_max_norm)
 
         optimizer.step()
+
+        ## Clamp material textures right after optimizer step
+        if (pass_idx == 1):
+            with torch.no_grad():
+                if 'kd' in opt_material:
+                    for mip in opt_material['kd'].getMips():
+                        mip.clamp_(min=0.0, max=1.0)
+
+                if 'ks' in opt_material:
+                    ks_min = torch.tensor(FLAGS.ks_min, device='cuda', dtype=torch.float32)
+                    ks_max = torch.tensor(FLAGS.ks_max, device='cuda', dtype=torch.float32)
+                    for mip in opt_material['ks'].getMips():
+                        mip[..., 0].clamp_(ks_min[0].item(), ks_max[0].item())
+                        mip[..., 1].clamp_(ks_min[1].item(), ks_max[1].item())
+                        mip[..., 2].clamp_(ks_min[2].item(), ks_max[2].item())
+
+                if 'normal' in opt_material:
+                    for mip in opt_material['normal'].getMips():
+                        mip[..., 0].clamp_(-1.0, 1.0)
+                        mip[..., 1].clamp_(-1.0, 1.0)
+                        mip[..., 2].clamp_( 0.0, 1.0)
+
         scheduler.step()
 
         if (optimize_geometry):
@@ -630,12 +670,13 @@ def optimize_mesh(
         # Print/save log.
         if log_interval and (it % log_interval == 0):
             img_loss_avg = np.mean(np.asarray(img_loss_vec[-log_interval:]))
-            reg_loss_avg = np.mean(np.asarray(reg_loss_vec[-log_interval:]))
+            reg_loss_avg = np.nanmean(np.asarray(reg_loss_vec[-log_interval:]))
             iter_dur_avg = np.mean(np.asarray(iter_dur_vec[-log_interval:]))
             
             remaining_time = (FLAGS.iter - it) * iter_dur_avg
-            print("iter=%5d / %5d, img_loss=%.6f, reg_loss=%.6f, lr=%.5f, time=%.1f ms, rem=%s" % 
-                (it, FLAGS.iter, img_loss_avg, reg_loss_avg, optimizer.param_groups[0]['lr'], iter_dur_avg*1000, util.time_to_text(remaining_time)))
+            print("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "]", end=" ")
+            print("iter=%5d / %5d, img_loss=%.6f, reg_loss=%.6f, lr=%.8f, time=%.1f ms, rem=%s" % 
+                  (it, FLAGS.iter, img_loss_avg, reg_loss_avg, optimizer.param_groups[0]['lr'], iter_dur_avg*1000, util.time_to_text(remaining_time)))
 
     return geometry, opt_material
 
@@ -644,375 +685,585 @@ def optimize_mesh(
 # def lambda_rule(epoch):
 #     return (1.0 - max(0, epoch + opt.epoch_count - opt.n_epochs) / float(opt.n_epochs_decay + 1))
 
+
+def SavePass1Checkpoint(geometry, mat, FLAGS, ckpt_path):
+
+    base_mesh = geometry.mesh  # DLMesh 裡的 mesh
+
+    ckpt = {
+        "mesh": {
+            "v_pos": base_mesh.v_pos.detach().cpu(),
+            "t_pos_idx": base_mesh.t_pos_idx.detach().cpu(),
+            "v_tex": base_mesh.v_tex.detach().cpu() if base_mesh.v_tex is not None else None,
+            "t_tex_idx": base_mesh.t_tex_idx.detach().cpu() if base_mesh.t_tex_idx is not None else None,
+            "v_nrm": base_mesh.v_nrm.detach().cpu() if base_mesh.v_nrm is not None else None,
+            "t_nrm_idx": base_mesh.t_nrm_idx.detach().cpu() if base_mesh.t_nrm_idx is not None else None,
+            "v_tng": base_mesh.v_tng.detach().cpu() if base_mesh.v_tng is not None else None,
+            "t_tng_idx": base_mesh.t_tng_idx.detach().cpu() if base_mesh.t_tng_idx is not None else None,
+        },
+        "material": {
+            "bsdf": mat["bsdf"] if "bsdf" in mat else None,
+            "no_perturbed_nrm": mat["no_perturbed_nrm"] if "no_perturbed_nrm" in mat else None,
+            "kd": [m.detach().cpu() for m in mat["kd"].getMips()] if "kd" in mat else None,
+            "ks": [m.detach().cpu() for m in mat["ks"].getMips()] if "ks" in mat else None,
+            "normal": [m.detach().cpu() for m in mat["normal"].getMips()] if "normal" in mat else None,
+        },
+        "flags": vars(FLAGS),
+    }
+
+    torch.save(ckpt, ckpt_path)
+    print(f"Saved pass-2 checkpoint to {ckpt_path}")
+
+
+def LoadPass1Checkpoint(ckpt_path, FLAGS):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    # --------------------------------------------------
+    # Rebuild material
+    # --------------------------------------------------
+    mat = {}
+
+    if ckpt["material"]["kd"] is not None:
+        kd_mips = [m.cuda().detach().clone().requires_grad_(True) for m in ckpt["material"]["kd"]]
+        mat["kd"] = texture.Texture2D(kd_mips if len(kd_mips) > 1 else kd_mips[0])
+
+    if ckpt["material"]["ks"] is not None:
+        ks_mips = [m.cuda().detach().clone().requires_grad_(True) for m in ckpt["material"]["ks"]]
+        mat["ks"] = texture.Texture2D(ks_mips if len(ks_mips) > 1 else ks_mips[0])
+
+    if ckpt["material"]["normal"] is not None:
+        nrm_mips = [m.cuda().detach().clone().requires_grad_(True) for m in ckpt["material"]["normal"]]
+        mat["normal"] = texture.Texture2D(nrm_mips if len(nrm_mips) > 1 else nrm_mips[0])
+
+    mat["bsdf"] = ckpt["material"]["bsdf"]
+    mat["no_perturbed_nrm"] = ckpt["material"]["no_perturbed_nrm"]
+
+    ## Rebuild mesh
+    base_mesh = Mesh(
+        v_pos=ckpt["mesh"]["v_pos"].cuda().detach().clone().requires_grad_(True),
+        t_pos_idx=ckpt["mesh"]["t_pos_idx"].cuda().detach().clone(),
+        v_tex=ckpt["mesh"]["v_tex"].cuda().detach().clone() if ckpt["mesh"]["v_tex"] is not None else None,
+        t_tex_idx=ckpt["mesh"]["t_tex_idx"].cuda().detach().clone() if ckpt["mesh"]["t_tex_idx"] is not None else None,
+        v_nrm=ckpt["mesh"]["v_nrm"].cuda().detach().clone() if ckpt["mesh"]["v_nrm"] is not None else None,
+        t_nrm_idx=ckpt["mesh"]["t_nrm_idx"].cuda().detach().clone() if ckpt["mesh"]["t_nrm_idx"] is not None else None,
+        v_tng=ckpt["mesh"]["v_tng"].cuda().detach().clone() if ckpt["mesh"]["v_tng"] is not None else None,
+        t_tng_idx=ckpt["mesh"]["t_tng_idx"].cuda().detach().clone() if ckpt["mesh"]["t_tng_idx"] is not None else None,
+        material=mat,
+    )
+
+    ## Rebuild geometry
+    geometry = DLMesh(base_mesh, FLAGS)
+
+    ## Make mesh and initial_guess in DLMesh meet with mesh in checkpoint
+    geometry.mesh = base_mesh.clone()
+    geometry.mesh.material = mat
+    geometry.mesh.v_pos.requires_grad_(True)
+
+    geometry.initial_guess = base_mesh.clone()
+    geometry.initial_guess.material = mat
+
+    return geometry, mat
+
 #----------------------------------------------------------------------------
 # Main function.
 #----------------------------------------------------------------------------
 
-# if __name__ == "__main__":
-parser = argparse.ArgumentParser(description='nvdiffrecmc')
-parser.add_argument('-i', '--iter', type=int, default=5000)
-parser.add_argument('-b', '--batch', type=int, default=1)
-parser.add_argument('-s', '--spp', type=int, default=1)
-parser.add_argument('-l', '--layers', type=int, default=1)
-parser.add_argument('-r', '--train-res', type=int, default=[512, 512])
-parser.add_argument('-dr', '--display-res', type=int, default=None)
-parser.add_argument('-tr', '--texture-res', nargs=2, type=int, default=[1024, 1024])
-parser.add_argument('-di', '--display-interval', type=int, default=0)
-parser.add_argument('-si', '--save-interval', type=int, default=1000)
-parser.add_argument('-lr', '--learning-rate', type=float, default=0.01)
-parser.add_argument('-mip', '--custom-mip', action='store_true', default=False)
-parser.add_argument('-bg', '--background', default='checker', choices=['black', 'white', 'checker', 'reference'])
-parser.add_argument('--loss', default='logl1', choices=['logl1', 'logl2', 'mse', 'smape', 'relativel2'])
-parser.add_argument('-o', '--out-dir', type=str, default=None)
-parser.add_argument('--config', type=str, default=None, help='Config file')
-parser.add_argument('-rm', '--ref_mesh', type=str)
-parser.add_argument('-bm', '--base-mesh', type=str, default=None)
-parser.add_argument('--validate', type=bool, default=True)
-
-## Render specific arguments
-parser.add_argument('--n_samples', type=int, default=4)
-parser.add_argument('--bsdf', type=str, default='pbr', choices=['pbr', 'diffuse', 'white'])
-
-## Denoiser specific arguments
-parser.add_argument('--denoiser', default='bilateral', choices=['none', 'bilateral'])
-parser.add_argument('--denoiser_demodulate', type=bool, default=True)
-
-FLAGS = parser.parse_args()
-# FLAGS.config = "configs/bob_w_camera.json"
-# FLAGS.config = "configs/custom.json"
-# FLAGS.config = "configs/experiment.json"
-# FLAGS.config = "configs/experiment_part.json"
-# FLAGS.config = "configs/custom_mesh.json"
-FLAGS.config = "configs/sim_scenes.json"
-# FLAGS.config = "configs/" + FLAGS.config
-
-FLAGS.mtl_override        = None        # Override material of model
-FLAGS.dmtet_grid          = 64          # Resolution of initial tet grid. We provide 64 and 128 resolution grids. 
-                                        #    Other resolutions can be generated with https://github.com/crawforddoran/quartet
-                                        #    We include examples in data/tets/generate_tets.py
-FLAGS.mesh_scale          = 2.1         # Scale of tet grid box. Adjust to cover the model
-FLAGS.envlight            = None        # HDR environment probe
-FLAGS.env_scale           = 1.0         # Env map intensity multiplier
-FLAGS.probe_res           = 256         # Env map probe resolution
-FLAGS.learn_lighting      = True        # Enable optimization of env lighting
-FLAGS.display             = None        # Configure validation window/display. E.g. [{"bsdf" : "kd"}, {"bsdf" : "ks"}]
-FLAGS.transparency        = False       # Enabled transparency through depth peeling
-FLAGS.lock_light          = False       # Disable light optimization in the second pass
-FLAGS.lock_pos            = False       # Disable vertex position optimization in the second pass
-FLAGS.sdf_regularizer     = 0.2         # Weight for sdf regularizer.
-FLAGS.laplace             = "relative"  # Mesh Laplacian ["absolute", "relative"]
-FLAGS.laplace_scale       = 3000.0      # Weight for Laplace regularizer. Default is relative with large weight
-FLAGS.pre_load            = True        # Pre-load entire dataset into memory for faster training
-FLAGS.no_perturbed_nrm    = False       # Disable normal map
-FLAGS.decorrelated        = False       # Use decorrelated sampling in forward and backward passes
-FLAGS.kd_min              = [ 0.0,  0.0,  0.0,  0.0]
-FLAGS.kd_max              = [ 1.0,  1.0,  1.0,  1.0]
-FLAGS.ks_min              = [ 0.0,  0.08, 0.0]
-FLAGS.ks_max              = [ 0.0,  1.0,  1.0]
-FLAGS.nrm_min             = [-1.0, -1.0,  0.0]
-FLAGS.nrm_max             = [ 1.0,  1.0,  1.0]
-FLAGS.clip_max_norm       = 0.0
-FLAGS.cam_near_far        = [0.001, 1000.0] # [m]
-
-## regularization weights in loss function
-FLAGS.lambda_kd           = 0.1 
-FLAGS.lambda_ks           = 0.05
-FLAGS.lambda_nrm          = 0.025
-FLAGS.lambda_nrm2         = 0.25
-FLAGS.lambda_chroma       = 0.0
-FLAGS.lambda_diffuse      = 0.15
-FLAGS.lambda_specular     = 0.0025
-
-## default custom flags
-FLAGS.fix_envlight        = True
-FLAGS.add_phys_cam        = False
-FLAGS.add_defocus_net     = False
-FLAGS.save_gt_test_imgs   = True
-FLAGS.defocus_mtrx_base_dir  = ""
-FLAGS.log_interval = 20
-FLAGS.rand_seed = 1234
-FLAGS.mesh_offset = [0., 0., 0.]
-
-if FLAGS.config is not None:
-    data = json.load(open(FLAGS.config, 'r'))
-    for key in data:
-        FLAGS.__dict__[key] = data[key]
-
-if FLAGS.display_res is None:
-    FLAGS.display_res = FLAGS.train_res
-if FLAGS.out_dir is None:
-    FLAGS.out_dir = 'out/cube_%d' % (FLAGS.train_res)
-else:
-    FLAGS.out_dir = 'out/' + FLAGS.out_dir
-
-print("Config / Flags:")
-print("---------")
-for key in FLAGS.__dict__.keys():
-    print(f"{key} : {FLAGS.__dict__[key]}")
-print("---------")
-
-os.makedirs(FLAGS.out_dir, exist_ok=True)
-
-## copy config to out_dir
-shutil.copy(FLAGS.config, os.path.join(FLAGS.out_dir, "config.json"))
-
-glctx         = dr.RasterizeGLContext() # Context for training
-glctx_display = glctx if FLAGS.batch_size < 16 else dr.RasterizeGLContext() # Context for display
-
-#### initialize the physics-based camera if added ####
-assert not(FLAGS.add_phys_cam and FLAGS.add_defocus_net), "phys_cam and defocus_net cannot be added simultaneously"
-if (FLAGS.add_phys_cam):
-
-    phys_cam_model_params_path = "./sim_cam_model_params.json"
-    phys_cam = PhysDiffCamera(FLAGS.train_res[0], FLAGS.train_res[1], 1234, 'cuda')
-    with open(phys_cam_model_params_path) as json_file:
-        cam_params = json.load(json_file)
-
-    noise_amp = 0.40
-    near_clip = 0.005 # [m]
-    far_clip = 100 # [m]
-
-    pixel_size = cam_params["pixel_size"] # [m]
-    rgb_QEs = np.array(cam_params["rgb_QEs"], dtype=float)
-    gain_params = cam_params["gain_params"]
-    noise_params = cam_params["noise_params"]
-    noise_params["noise_gains"] = noise_amp * np.array(noise_params["noise_gains"], dtype=float)
-    noise_params["STD_reads"] = noise_amp * np.array(noise_params["STD_reads"], dtype=float)
-
-    ## lens parameters (Arducam LN042 5mm lens)
-    if (FLAGS.config == "configs/experiment.json"):
-        print("customized cam model params for experiment ....")
-        focal_length = (806.40536205223032 + 809.61061413615107)/2 * 2 / 0.300 / 1e6 # [m]
-        hFOV = 2 * np.arctan(1024 / (2 * 809.61061413615107)) # [rad]
-        max_scene_light = 10000 * 0.10 / np.sum(np.array([0.825, 0., 0.825])**2) # [lux = lumen/m^2]
-        # max_scene_light = 1080 # [lux = lumen/m^2]
-
-    else:        
-        focal_length = cam_params["focal_length"] # [m]
-        hFOV = cam_params["hFOV"] * pi / 180.0 # [rad]
-        max_scene_light = 400
+if __name__ == "__main__":
     
-    sensor_width = 2 * focal_length * np.tan(hFOV / 2) # [m]
-
-    phys_cam.SetModelParameters(sensor_width, pixel_size, max_scene_light, rgb_QEs, gain_params, noise_params)
-    phys_cam.BuildVignetMask(sensor_width, focal_length) 
-    phys_cam.artifact_switches = {
-        "vignetting": False,
-        "defocus_blur": True,
-        "aggregate": False,
-        "add_noise": False,
-        "expsr2dv": False,
-    }
-
-    defocus_net = None
-
-elif (FLAGS.add_defocus_net):
-    defocus_net = networks.define_G(4, 3, 64, "unet_1024", gpu_ids=[0], use_dropout=True)
-    phys_cam = None
-
-else:
-    phys_cam = None
-    defocus_net = None
-
-## log
-if (FLAGS.add_phys_cam):
-    print("phys_cam added:")
-    for key in phys_cam.artifact_switches.keys():
-        print(f"{key} : {phys_cam.artifact_switches[key]}")
-
-#### set up random seed
-random.seed(FLAGS.rand_seed)
-np.random.seed(FLAGS.rand_seed)
-torch.manual_seed(FLAGS.rand_seed)
-
-# ==============================================================================================
-#  Create data pipeline
-# ==============================================================================================
-if (os.path.splitext(FLAGS.ref_mesh)[1] == '.obj'):
-    ref_mesh      = mesh.load_mesh(FLAGS.ref_mesh, FLAGS.mtl_override)
-    dataset_train = DatasetMesh(ref_mesh, glctx, RADIUS, FLAGS, validate=False, phys_cam=phys_cam)
-    dataset_valid = DatasetMesh(ref_mesh, glctx_display, RADIUS, FLAGS, validate=True, phys_cam=phys_cam)
-
-elif os.path.isdir(FLAGS.ref_mesh):
-    if os.path.isfile(os.path.join(FLAGS.ref_mesh, 'poses_bounds.npy')):
-        dataset_train = DatasetLLFF(FLAGS.ref_mesh, FLAGS, examples=(FLAGS.iter + 1) * FLAGS.batch_size)
-        dataset_valid = DatasetLLFF(FLAGS.ref_mesh, FLAGS)
+    ############################
+    ######## Parameters ########
+    ############################
     
-    elif (FLAGS.ref_mesh.split(os.sep)[-2] in ['custom', 'experiment', 'sim_scenes']):
-        dataset_train = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_train.json'), FLAGS, num_samples=(FLAGS.iter + 1) * FLAGS.batch_size)
-        dataset_valid = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_test.json'), FLAGS, num_samples=FLAGS.validate_num)
+    ## Parameter order: Arguments --> Defaults in code --> Config file
     
-    elif (os.path.isfile(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'))  and not os.path.isfile(os.path.join(FLAGS.ref_mesh, 'intrinsics.txt'))):
-        dataset_train = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'), FLAGS, num_samples=(FLAGS.iter + 1) * FLAGS.batch_size)
-        dataset_valid = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_test.json'), FLAGS)
+    parser = argparse.ArgumentParser(description='nvdiffrecmc')
+    parser.add_argument('-i', '--iter', type=int, default=5000)
+    parser.add_argument('-b', '--batch', type=int, default=1)
+    parser.add_argument('-s', '--spp', type=int, default=1)
+    parser.add_argument('-l', '--layers', type=int, default=1)
+    parser.add_argument('-r', '--train-res', type=int, default=[512, 512])
+    parser.add_argument('-dr', '--display-res', type=int, default=None)
+    parser.add_argument('-tr', '--texture-res', nargs=2, type=int, default=[1024, 1024])
+    parser.add_argument('-di', '--display-interval', type=int, default=0)
+    parser.add_argument('-si', '--save-interval', type=int, default=1000)
+    parser.add_argument('-lr', '--learning-rate', type=float, default=0.01)
+    parser.add_argument('-mip', '--custom-mip', action='store_true', default=False)
+    parser.add_argument('-bg', '--background', default='checker', choices=['black', 'white', 'checker', 'reference'])
+    parser.add_argument('--loss', default='logl1', choices=['logl1', 'logl2', 'mse', 'smape', 'relativel2'])
+    parser.add_argument('-o', '--out-dir', type=str, default=None)
+    parser.add_argument('--config', type=str, default=None, help='Config file')
+    parser.add_argument('-rm', '--ref_mesh', type=str)
+    parser.add_argument('-bm', '--base-mesh', type=str, default=None)
+    parser.add_argument('--validate', type=bool, default=True)
+    
+    ## Render specific arguments
+    parser.add_argument('--n_samples', type=int, default=4)
+    parser.add_argument('--bsdf', type=str, default='pbr', choices=['pbr', 'diffuse', 'white'])
+    
+    ## Denoiser specific arguments
+    parser.add_argument('--denoiser', default='bilateral', choices=['none', 'bilateral'])
+    parser.add_argument('--denoiser_demodulate', type=bool, default=True)
+    
+    ## Customized arguments
+    parser.add_argument('--scene', required=True, type=str, default="", help="Name of the scene to be optimized")
+    parser.add_argument('--mesh_scale', type=float, required=True, help="Scale of tet grid box. Adjust to cover the model")
+    parser.add_argument("--out_dir", type=str, required=True, default="", help="Output directory for logs and results")
+    parser.add_argument("--skip_pass1", action='store_true', help="Whether to skip the first pass of optimization and directly load the pass-1 checkpoint")
+    parser.add_argument("--add_phys_cam", action='store_true', help="Whether to add the physics-based camera model into the optimization")
+    parser.add_argument("--save_gt_test_imgs", action='store_true', help="Whether to save ground truth test images for visual comparison")
+    parser.add_argument('--defocus_type', type=str, default=None, help="which defocus type to run: gaussian or uniform")
+    parser.add_argument('--cond', type=str, default=None, help="which condition of using the physics-based camera: full, wo_expsr_related, wo_defocus")
+    
+    FLAGS = parser.parse_args()
+    
+    # FLAGS.scene = "RealScene01"
+    # FLAGS.mesh_scale = 1.4
+    # FLAGS.out_dir = "../DiffPhysCam_Data/NovelViewSynthesis_Output/RealScene01_debug"
+    # FLAGS.skip_pass1 = True
+    
+    # FLAGS.config = "configs/bob_w_camera.json"
+    # FLAGS.config = "configs/custom.json"
+    # FLAGS.config = "configs/experiment.json"
+    # FLAGS.config = "configs/experiment_part.json"
+    # FLAGS.config = "configs/custom_mesh.json"
+    # FLAGS.config = "configs/sim_scenes.json"
+    # FLAGS.config = "configs/" + FLAGS.config
+    
+    if ("Real" == FLAGS.scene[:4]):
+        
+        if (FLAGS.out_dir[-5:] == "sugar"):
+            FLAGS.config = "configs/real_scenes_sugar.json"    
+        
+        else:
+            FLAGS.config = "configs/real_scenes.json"
+    
+    elif ("Sim" == FLAGS.scene[:3]):
+        FLAGS.config = "configs/sim_scenes.json"
+    
+    FLAGS.mtl_override        = None        # Override material of model
+    FLAGS.dmtet_grid          = 64          # Resolution of initial tet grid. We provide 64 and 128 resolution grids. 
+                                            #    Other resolutions can be generated with https://github.com/crawforddoran/quartet
+                                            #    We include examples in data/tets/generate_tets.py
+    FLAGS.envlight            = None        # HDR environment probe
+    FLAGS.env_scale           = 1.0         # Env map intensity multiplier
+    FLAGS.probe_res           = 256         # Env map probe resolution
+    FLAGS.learn_lighting      = False       # Enable optimization of env lighting
+    FLAGS.display             = None        # Configure validation window/display. E.g. [{"bsdf" : "kd"}, {"bsdf" : "ks"}]
+    FLAGS.transparency        = False       # Enabled transparency through depth peeling
+    FLAGS.lock_light          = True        # Disable light optimization in the second pass
+    FLAGS.lock_pos            = False       # Disable vertex position optimization in the second pass
+    FLAGS.sdf_regularizer     = 0.2         # Weight for sdf regularizer.
+    FLAGS.laplace             = "relative"  # Mesh Laplacian ["absolute", "relative"]
+    FLAGS.laplace_scale       = 3000.0      # Weight for Laplace regularizer. Default is relative with large weight
+    FLAGS.pre_load            = True        # Pre-load entire dataset into memory for faster training
+    FLAGS.no_perturbed_nrm    = False       # Disable normal map
+    FLAGS.decorrelated        = False       # Use decorrelated sampling in forward and backward passes
+    FLAGS.kd_min              = [ 0.0,  0.0,  0.0,  0.0]
+    FLAGS.kd_max              = [ 1.0,  1.0,  1.0,  1.0]
+    FLAGS.ks_min              = [ 0.0,  0.05, 0.0]
+    FLAGS.ks_max              = [ 0.0,  1.0,  1.0]
+    FLAGS.nrm_min             = [-1.0, -1.0,  0.0]
+    FLAGS.nrm_max             = [ 1.0,  1.0,  1.0]
+    FLAGS.clip_max_norm       = 0.0
+    FLAGS.cam_near_far        = [0.001, 1000.0] # [m]
+    
+    ## regularization weights in loss function
+    FLAGS.lambda_kd           = 0.1 
+    FLAGS.lambda_ks           = 0.05
+    FLAGS.lambda_nrm          = 0.025
+    FLAGS.lambda_nrm2         = 0.25
+    FLAGS.lambda_chroma       = 0.0
+    FLAGS.lambda_diffuse      = 0.15
+    FLAGS.lambda_specular     = 0.0025
+    
+    ## Customized flags
+    FLAGS.fix_envlight        = False       # Whether to have only one environment map or more than one environment maps to use
+    FLAGS.add_defocus_net     = False
+    FLAGS.log_interval = 20
+    FLAGS.save_interval = 20
+    FLAGS.rand_seed = torch_random_seed
+    FLAGS.mesh_offset = [0., 0., 0.]
+    FLAGS.gt_img_dir = "imgs_wo_ground/"
+    FLAGS.ref_mesh = f"../DiffPhysCam_Data/NovelViewSynthesis_Data/{FLAGS.scene}/"
+    FLAGS.envlight = f"../DiffPhysCam_Data/NovelViewSynthesis_Data/{FLAGS.scene}/envmaps/"
+    
+    # FLAGS.base_mesh = f"../DiffPhysCam_Data/NovelViewSynthesis_Data/{FLAGS.scene}/rectified_separate_objects.obj"
+    # FLAGS.base_material = False
+    
+    ######################
+    ######## Main ########
+    ######################
+    
+    ## Load config from json file and override default and argument-provided flags
+    if FLAGS.config is not None:
+        
+        data = json.load(open(FLAGS.config, 'r'))
+        
+        for key in data:
+            FLAGS.__dict__[key] = data[key]
+    
+    if FLAGS.display_res is None:
+        FLAGS.display_res = FLAGS.train_res
+    
+    print("Config / Flags:")
+    print("---------")
+    for key in FLAGS.__dict__.keys():
+        print(f"{key} : {FLAGS.__dict__[key]}")
+    
+    print("---------")
+    
+    
+    os.makedirs(FLAGS.out_dir, exist_ok=True)
+    
+    ## copy config to out_dir
+    shutil.copy(FLAGS.config, os.path.join(FLAGS.out_dir, "config.json"))
+    
+    glctx         = dr.RasterizeGLContext() # Context for training
+    glctx_display = glctx if FLAGS.batch_size < 16 else dr.RasterizeGLContext() # Context for display
+    
+    #### initialize the physics-based camera if added ####
+    
+    assert not(FLAGS.add_phys_cam and FLAGS.add_defocus_net), "phys_cam and defocus_net cannot be added simultaneously"
+    
+    if (FLAGS.add_phys_cam):
+        
+        assert(FLAGS.cond is not None), "Condition for using the physics-based camera is not specified ..."
+        assert(FLAGS.defocus_type is not None), "defocus_type for using the physics-based camera is not specified ..."
+    
+        #### Paths ####
+        phys_cam_model_params_path = f"../CameraCalibrateExp/phys_cam_model_params_defocus_{FLAGS.defocus_type}.json"
+        FLAGS.defocus_mtrx_base_dir = f"../DiffPhysCam_Data/NovelViewSynthesis_Data/{FLAGS.scene}/defocus_matrices_{FLAGS.defocus_type}_wo_ground/"
+    
+        noise_amp = 0.40
+        near_clip = 0.005 # [m]
+        far_clip = 100 # [m]
+    
+        phys_cam = PhysDiffCamera(FLAGS.train_res[0], FLAGS.train_res[1], torch_random_seed, 'cuda')
+        with open(phys_cam_model_params_path) as json_file:
+            cam_params = json.load(json_file)
+    
+        pixel_size = cam_params["pixel_size"] # [m]
+        rgb_QEs = np.array(cam_params["rgb_QEs"], dtype=float)
+        
+        gain_params = cam_params["gain_params"]
+        gain_params["max_CoC"] = 15 # [px]
+        
+        noise_params = cam_params["noise_params"]
+        noise_params["noise_gains"] = noise_amp * np.array(noise_params["noise_gains"], dtype=float)
+        noise_params["STD_reads"] = noise_amp * np.array(noise_params["STD_reads"], dtype=float)
+        
+    
+        ## Lens parameters (Arducam LN042 5mm lens)
+        focal_length = 0.00572951691782118 # [m]
+        hFOV = 1.1278099154119037 # [rad]
+        sensor_width = 2 * focal_length * np.tan(hFOV / 2) # [m]
+    
+        if (FLAGS.scene == "RealScene01"):
+            print("customized cam model params for Real Scene 1 ....")
+            max_scene_light = 10000 * 0.10 / np.sum(np.array([0.825, 0., 0.825])**2) # [lux = lumen/m^2]
+            # max_scene_light = 1080 # [lux = lumen/m^2]
+    
+        elif ("SimScene" in FLAGS.scene):
+            max_scene_light = 400        
+    
+        phys_cam.SetModelParameters(sensor_width, pixel_size, max_scene_light, rgb_QEs, gain_params, noise_params)
+        phys_cam.BuildVignetMask(sensor_width, focal_length) 
+        
+        if (FLAGS.cond == "full"):
+            phys_cam.artifact_switches = {
+                "vignetting": True,
+                "defocus_blur": True,
+                "aggregate": True,
+                "add_noise": False,
+                "expsr2dv": True,
+            }
+        elif (FLAGS.cond == "wo_defocus"):
+            phys_cam.artifact_switches = {
+                "vignetting": True,
+                "defocus_blur": False,
+                "aggregate": True,
+                "add_noise": False,
+                "expsr2dv": True,
+            }
+        elif (FLAGS.cond == "wo_expsr_related"):
+            phys_cam.artifact_switches = {
+                "vignetting": False,
+                "defocus_blur": True,
+                "aggregate": False,
+                "add_noise": False,
+                "expsr2dv": False,
+            }
+        else:
+            assert False, "Unknown condition with adding the DiffPhysCam ..."
+    
+        defocus_net = None
+    
+    elif (FLAGS.add_defocus_net):
+        defocus_net = networks.define_G(4, 3, 64, "unet_1024", gpu_ids=[0], use_dropout=True)
+        phys_cam = None
     
     else:
+        phys_cam = None
+        defocus_net = None
+    
+    ## log
+    if (FLAGS.add_phys_cam):
+        print("phys_cam added:")
+        for key in phys_cam.artifact_switches.keys():
+            print(f"{key} : {phys_cam.artifact_switches[key]}")
+    
+    #### set up random seed
+    random.seed(FLAGS.rand_seed)
+    np.random.seed(FLAGS.rand_seed)
+    torch.manual_seed(FLAGS.rand_seed)
+    
+    # ==============================================================================================
+    #  Create data pipeline
+    # ==============================================================================================
+    if (os.path.splitext(FLAGS.ref_mesh)[1] == '.obj'):
+        ref_mesh      = mesh.load_mesh(FLAGS.ref_mesh, FLAGS.mtl_override)
+        dataset_train = DatasetMesh(ref_mesh, glctx, RADIUS, FLAGS, validate=False, phys_cam=phys_cam)
+        dataset_valid = DatasetMesh(ref_mesh, glctx_display, RADIUS, FLAGS, validate=True, phys_cam=phys_cam)
+    
+    elif os.path.isdir(FLAGS.ref_mesh):
+        if os.path.isfile(os.path.join(FLAGS.ref_mesh, 'poses_bounds.npy')):
+            dataset_train = DatasetLLFF(FLAGS.ref_mesh, FLAGS, examples=(FLAGS.iter + 1) * FLAGS.batch_size)
+            dataset_valid = DatasetLLFF(FLAGS.ref_mesh, FLAGS)
+        
+        elif (any(sub in FLAGS.ref_mesh.split(os.sep)[-2] for sub in ['custom', 'RealScene', 'SimScene'])):
+            dataset_train = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_train.json'), FLAGS, num_samples=(FLAGS.iter + 1) * FLAGS.batch_size)
+            dataset_valid = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_test.json'), FLAGS, num_samples=FLAGS.validate_num)
+        
+        elif (os.path.isfile(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'))  and not os.path.isfile(os.path.join(FLAGS.ref_mesh, 'intrinsics.txt'))):
+            dataset_train = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'), FLAGS, num_samples=(FLAGS.iter + 1) * FLAGS.batch_size)
+            dataset_valid = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_test.json'), FLAGS)
+        
+        else:
+            assert False, "Invalid dataset format"
+    
+    else:
+        print("Invalid dataset format", FLAGS.ref_mesh)
         assert False, "Invalid dataset format"
-
-else:
-    print("Invalid dataset format", FLAGS.ref_mesh)
-    assert False, "Invalid dataset format"
-
-# ==============================================================================================
-#  Create trainable light
-# ==============================================================================================
-lgt = None
-if (FLAGS.learn_lighting == True):
-    lgt = light.create_trainable_env_rnd(FLAGS.probe_res, scale=0.0, bias=0.5)
-elif (FLAGS.learn_lighting == False and FLAGS.fix_envlight == True):
-    lgt = light.load_env(FLAGS.envlight, scale=FLAGS.env_scale, res=[FLAGS.probe_res, FLAGS.probe_res])
-
-# ==============================================================================================
-#  Setup denoiser
-# ==============================================================================================
-
-denoiser = None
-if (FLAGS.denoiser == 'bilateral'):
-    denoiser = BilateralDenoiser().cuda()
-else:
-    assert (FLAGS.denoiser == 'none'), "Invalid denoiser %s" % FLAGS.denoiser
-
-if (FLAGS.base_mesh is None):
+    
     # ==============================================================================================
-    #  If no initial guess, use DMTet to create geometry
+    #  Create trainable light
     # ==============================================================================================
-
-    # Setup geometry for optimization
-    geometry = DMTetGeometry(FLAGS.dmtet_grid, FLAGS.mesh_scale, FLAGS.mesh_offset, FLAGS)
-
-    # Setup textures, make initial guess from reference if possible
-    mat = initial_guess_material(geometry, True, FLAGS)
-
-    # Run optimization
-    mat['no_perturbed_nrm'] = True
-    geometry, mat = optimize_mesh(
-        denoiser, glctx, glctx_display, geometry, mat, lgt, dataset_train, dataset_valid, FLAGS,
-        log_interval=FLAGS.log_interval,
-        pass_idx=0,
-        pass_name="dmtet_pass1",
-        optimize_light=FLAGS.learn_lighting,
-        phys_cam=phys_cam,
-        defocus_net=defocus_net,
-    )
+    lgt = None
+    if (FLAGS.learn_lighting == True):
+        lgt = light.create_trainable_env_rnd(FLAGS.probe_res, scale=0.0, bias=0.5)
     
-    # pass_idx = 1
-
-    if (FLAGS.validate):
-        validate(
-            glctx_display, geometry, mat, lgt, dataset_valid, os.path.join(FLAGS.out_dir, "dmtet_validate"), FLAGS, denoiser,
-            phys_cam=phys_cam, defocus_net=defocus_net,
-        )
-    print("finished validation")
+    elif (FLAGS.learn_lighting == False and FLAGS.fix_envlight == True):
+        lgt = light.load_env(FLAGS.envlight, scale=FLAGS.env_scale, res=[FLAGS.probe_res, FLAGS.probe_res])
     
-    # Create initial guess mesh from result
-    eval_mesh = geometry.getMesh(mat)
-    
-    # Create uvs with xatlas
-    v_pos = eval_mesh.v_pos.detach().cpu().numpy()
-    t_pos_idx = eval_mesh.t_pos_idx.detach().cpu().numpy()
-    
-    ## save, in case getting stuck
-    os.makedirs(os.path.join(FLAGS.out_dir, "dmtet_mesh"), exist_ok=True)
-    print(f"v_pos.shape={v_pos.shape}")
-    print(f"t_pos_idx.shape={t_pos_idx.shape}")
-    np.savez_compressed(os.path.join(FLAGS.out_dir, "dmtet_mesh/", "v_pos.npz"), val=v_pos)
-    np.savez_compressed(os.path.join(FLAGS.out_dir, "dmtet_mesh/", "t_pos_idx.npz"), val=t_pos_idx)
-    
-    print("xatlas.parametrize starts working")
-    t_start = time.time()
-    """
-    def parametrize_chunk(chunk):
-        return xatlas.parametrize(chunk[0], chunk[1])
-
-    rows_chunks = 2
-    cols_chunks = 3
-    num_chunks = rows_chunks * cols_chunks
-
-    v_pos_chunks = num_chunks * [v_pos]
-    # t_pos_idx_chunks = np.array_split(t_pos_idx, num_chunks)
-    t_pos_idx_chunks = [
-        t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2]  < 0) & (v_pos[t_pos_idx[:, 0], 0] < -0.4))[0]],
-        t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2]  < 0) & (-0.4 <= v_pos[t_pos_idx[:, 0], 0]) & (v_pos[t_pos_idx[:, 0], 0] < 0.4))[0]],
-        t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2]  < 0) & ( 0.4 <= v_pos[t_pos_idx[:, 0], 0]))[0]],
-        t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2] >= 0) & (v_pos[t_pos_idx[:, 0], 0] < -0.4))[0]],
-        t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2] >= 0) & (-0.4 <= v_pos[t_pos_idx[:, 0], 0]) & (v_pos[t_pos_idx[:, 0], 0] < 0.4))[0]],
-        t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2] >= 0) & ( 0.4 <= v_pos[t_pos_idx[:, 0], 0]))[0]],
-    ]
-    for t_pos_idx_chunk_idx in range(len(t_pos_idx_chunks)):
-        print(f"t_pos_idx_chunks[{t_pos_idx_chunk_idx}].shape={t_pos_idx_chunks[t_pos_idx_chunk_idx].shape}")
-
-    with multiprocessing.Pool(num_chunks) as pool:
-        results = pool.map(parametrize_chunk, zip(v_pos_chunks, t_pos_idx_chunks))
-    
-    vmapping, indices, uvs = [], [], []
-    total_num_vertices = 0
-    for result_idx in range(num_chunks):
-        row_idx = result_idx // cols_chunks
-        col_idx = result_idx % cols_chunks
-        
-        sub_vmapping, sub_indices, sub_uvs = results[result_idx]
-        
-        ## map sub_uvs to correct uvs on the big atlas
-        sub_uvs[:, 0] = (row_idx + sub_uvs[:, 0]) / rows_chunks
-        sub_uvs[:, 1] = (col_idx + sub_uvs[:, 1]) / cols_chunks
-        
-        ## shift sub_indices with aggregated number of vertices
-        sub_indices += total_num_vertices
-        
-        ## aggregate total number of vertices
-        total_num_vertices += len(sub_uvs)
-        
-        ## collect sub_vmapping, sub_indices, and sub_uvs
-        vmapping.append(sub_vmapping)
-        indices.append(sub_indices)
-        uvs.append(sub_uvs)
-    
-    vmapping = np.hstack(vmapping)
-    indices = np.vstack(indices)
-    uvs = np.vstack(uvs)
-    """
-    
-    vmapping, indices, uvs = xatlas.parametrize(v_pos, t_pos_idx)
-    
-    print(f"xatlas.parametrize took {(time.time() - t_start): .3f} sec")
-
-    base_mesh = xatlas_uvmap(glctx_display, eval_mesh, indices, uvs, mat, FLAGS).clone()
-    print("base_mesh built")
-    base_mesh.v_pos = base_mesh.v_pos.clone().detach().requires_grad_(True)
-    mat = material.create_trainable(base_mesh.material.copy())
-    print("material created")
-    
-    geometry = DLMesh(base_mesh, FLAGS)
-
-    # Dump mesh for debugging; save learnables
-    obj.write_obj(os.path.join(FLAGS.out_dir, "dmtet_mesh/"), base_mesh)
-    if (FLAGS.learn_lighting):
-        light.save_env_map(os.path.join(FLAGS.out_dir, "dmtet_mesh/probe.hdr"), lgt)
-
-    if (defocus_net is not None):
-        torch.save(defocus_net.state_dict(), os.path.join(FLAGS.out_dir, "dmtet_mesh/defocus_net_pass1.ckpt"))
-
     # ==============================================================================================
-    #  Pass 2: Train with fixed topology (mesh)
+    #  Setup denoiser
     # ==============================================================================================
-    if ((FLAGS.pass2 is None) or (FLAGS.pass2 == True)):
-        if (FLAGS.transparency):
-            FLAGS.layers = 8
+    
+    denoiser = None
+    if (FLAGS.denoiser == 'bilateral'):
+        denoiser = BilateralDenoiser().cuda()
+    else:
+        assert (FLAGS.denoiser == 'none'), "Invalid denoiser %s" % FLAGS.denoiser
+    
+    if (FLAGS.base_mesh is None):
+        # ==============================================================================================
+        #  Pass 1: If no initial guess, use DMTet to create geometry
+        # ==============================================================================================
+        if (not FLAGS.skip_pass1):
+            # Setup geometry for optimization
+            geometry = DMTetGeometry(FLAGS.dmtet_grid, FLAGS.mesh_scale, FLAGS.mesh_offset, FLAGS)
+        
+            # Setup textures, make initial guess from reference if possible
+            mat = initial_guess_material(geometry, True, FLAGS)
+        
+            # Run optimization
+            mat['no_perturbed_nrm'] = True
+            geometry, mat = optimize_mesh(
+                denoiser, glctx, glctx_display, geometry, mat, lgt, dataset_train, dataset_valid, FLAGS,
+                log_interval=FLAGS.log_interval,
+                pass_idx=0,
+                pass_name="dmtet_pass1",
+                optimize_light=FLAGS.learn_lighting,
+                phys_cam=phys_cam,
+                defocus_net=defocus_net,
+            )
+            
+            # pass_idx = 1
+        
+            if (FLAGS.validate):
+                validate(
+                    glctx_display, geometry, mat, lgt, dataset_valid, os.path.join(FLAGS.out_dir, "dmtet_validate"), FLAGS, denoiser,
+                    phys_cam=phys_cam, defocus_net=defocus_net,
+                )
+            print("finished validation")
+            
+            # Create initial guess mesh from result
+            eval_mesh = geometry.getMesh(mat)
+            
+            # Create uvs with xatlas
+            v_pos = eval_mesh.v_pos.detach().cpu().numpy()
+            t_pos_idx = eval_mesh.t_pos_idx.detach().cpu().numpy()
+            
+            ## Save, in case getting stuck
+            os.makedirs(os.path.join(FLAGS.out_dir, "dmtet_mesh"), exist_ok=True)
+            print(f"v_pos.shape={v_pos.shape}")
+            print(f"t_pos_idx.shape={t_pos_idx.shape}")
+            np.savez_compressed(os.path.join(FLAGS.out_dir, "dmtet_mesh/", "v_pos.npz"), val=v_pos)
+            np.savez_compressed(os.path.join(FLAGS.out_dir, "dmtet_mesh/", "t_pos_idx.npz"), val=t_pos_idx)
+            
+            print("xatlas.parametrize starts working")
+            t_start = time.time()
+            """
+            def parametrize_chunk(chunk):
+                return xatlas.parametrize(chunk[0], chunk[1])
+        
+            rows_chunks = 2
+            cols_chunks = 3
+            num_chunks = rows_chunks * cols_chunks
+        
+            v_pos_chunks = num_chunks * [v_pos]
+            # t_pos_idx_chunks = np.array_split(t_pos_idx, num_chunks)
+            t_pos_idx_chunks = [
+                t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2]  < 0) & (v_pos[t_pos_idx[:, 0], 0] < -0.4))[0]],
+                t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2]  < 0) & (-0.4 <= v_pos[t_pos_idx[:, 0], 0]) & (v_pos[t_pos_idx[:, 0], 0] < 0.4))[0]],
+                t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2]  < 0) & ( 0.4 <= v_pos[t_pos_idx[:, 0], 0]))[0]],
+                t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2] >= 0) & (v_pos[t_pos_idx[:, 0], 0] < -0.4))[0]],
+                t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2] >= 0) & (-0.4 <= v_pos[t_pos_idx[:, 0], 0]) & (v_pos[t_pos_idx[:, 0], 0] < 0.4))[0]],
+                t_pos_idx[np.where((v_pos[t_pos_idx[:, 0], 2] >= 0) & ( 0.4 <= v_pos[t_pos_idx[:, 0], 0]))[0]],
+            ]
+            for t_pos_idx_chunk_idx in range(len(t_pos_idx_chunks)):
+                print(f"t_pos_idx_chunks[{t_pos_idx_chunk_idx}].shape={t_pos_idx_chunks[t_pos_idx_chunk_idx].shape}")
+        
+            with multiprocessing.Pool(num_chunks) as pool:
+                results = pool.map(parametrize_chunk, zip(v_pos_chunks, t_pos_idx_chunks))
+            
+            vmapping, indices, uvs = [], [], []
+            total_num_vertices = 0
+            for result_idx in range(num_chunks):
+                row_idx = result_idx // cols_chunks
+                col_idx = result_idx % cols_chunks
+                
+                sub_vmapping, sub_indices, sub_uvs = results[result_idx]
+                
+                ## map sub_uvs to correct uvs on the big atlas
+                sub_uvs[:, 0] = (row_idx + sub_uvs[:, 0]) / rows_chunks
+                sub_uvs[:, 1] = (col_idx + sub_uvs[:, 1]) / cols_chunks
+                
+                ## shift sub_indices with aggregated number of vertices
+                sub_indices += total_num_vertices
+                
+                ## aggregate total number of vertices
+                total_num_vertices += len(sub_uvs)
+                
+                ## collect sub_vmapping, sub_indices, and sub_uvs
+                vmapping.append(sub_vmapping)
+                indices.append(sub_indices)
+                uvs.append(sub_uvs)
+            
+            vmapping = np.hstack(vmapping)
+            indices = np.vstack(indices)
+            uvs = np.vstack(uvs)
+            """
+            
+            vmapping, indices, uvs = xatlas.parametrize(v_pos, t_pos_idx)
+            
+            print(f"xatlas.parametrize took {(time.time() - t_start): .3f} sec")
+        
+            base_mesh = xatlas_uvmap(glctx_display, eval_mesh, indices, uvs, mat, FLAGS).clone()
+            print("base_mesh built")
+            base_mesh.v_pos = base_mesh.v_pos.clone().detach().requires_grad_(True)
+            mat = material.create_trainable(base_mesh.material.copy())
+            print("material created")
+            
+            geometry = DLMesh(base_mesh, FLAGS)
+        
+            # Dump mesh for debugging; save learnables
+            obj.write_obj(os.path.join(FLAGS.out_dir, "dmtet_mesh/"), base_mesh)
+            if (FLAGS.learn_lighting):
+                light.save_env_map(os.path.join(FLAGS.out_dir, "dmtet_mesh/probe.hdr"), lgt)
+        
+            if (defocus_net is not None):
+                torch.save(defocus_net.state_dict(), os.path.join(FLAGS.out_dir, "dmtet_mesh/defocus_net_pass1.ckpt"))
+            
+            SavePass1Checkpoint(geometry, mat, FLAGS, os.path.join(FLAGS.out_dir, "dmtet_mesh/pass1_result.ckpt"))
+            
+        # ==============================================================================================
+        #  Pass 2: Train with fixed topology (mesh)
+        # ==============================================================================================
+        
+        if (FLAGS.skip_pass1):
+            print("\nPass 1 skipped, directly loading result from previous Pass 1 ......\n")
+            geometry, mat = LoadPass1Checkpoint(os.path.join(FLAGS.out_dir, "dmtet_mesh/pass1_result.ckpt"), FLAGS)
+        
+        if ((FLAGS.pass2 is None) or (FLAGS.pass2 == True)):
+            
+            if (FLAGS.transparency):
+                FLAGS.layers = 8
+    
+            mat['no_perturbed_nrm'] = False
+            print(f"mat['no_perturbed_nrm'] = {mat['no_perturbed_nrm']}")
+
+            geometry, mat = optimize_mesh(
+                denoiser, glctx, glctx_display, geometry, mat, lgt, dataset_train, dataset_valid, FLAGS,
+                # pass_idx=pass_idx,
+                pass_idx=1,
+                pass_name="mesh_pass2",
+                warmup_iter=100, # Use warmup to avoid nasty Adam spikes
+                optimize_light=not FLAGS.lock_light,
+                optimize_geometry=not FLAGS.lock_pos,
+                log_interval=FLAGS.log_interval,
+                phys_cam=phys_cam,
+                defocus_net=defocus_net,
+            )
+    
+            # ==============================================================================================
+            #  Validate
+            # ==============================================================================================
+            if (FLAGS.validate):
+                validate(
+                    glctx_display, geometry, mat, lgt, dataset_valid, os.path.join(FLAGS.out_dir, "validate"), FLAGS, denoiser,
+                    phys_cam=phys_cam, defocus_net=defocus_net,
+                )
+    
+            # ==============================================================================================
+            #  Dump output
+            # ==============================================================================================
+            final_mesh = geometry.getMesh(mat)
+    
+            os.makedirs(os.path.join(FLAGS.out_dir, "mesh"), exist_ok=True)
+            obj.write_obj(os.path.join(FLAGS.out_dir, "mesh/"), final_mesh)
+            if (lgt is not None):
+                light.save_env_map(os.path.join(FLAGS.out_dir, "mesh/probe.hdr"), lgt) 
+    
+            if (defocus_net is not None):
+                torch.save(defocus_net.state_dict(), os.path.join(FLAGS.out_dir, "dmtet_mesh/defocus_net_pass2.ckpt"))
+    else:
+        # ==============================================================================================
+        #  Train with fixed topology (mesh)
+        # ==============================================================================================
+    
+        # Load initial guess mesh from file
+        base_mesh = mesh.load_mesh(FLAGS.base_mesh)
+        geometry = DLMesh(base_mesh, FLAGS)
+        base_mesh.v_pos = base_mesh.v_pos.clone().detach().requires_grad_(True)
+        base_material = base_mesh.material if FLAGS.base_material is True else None
+        mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_material)
 
         mat['no_perturbed_nrm'] = False
+        print(f"mat['no_perturbed_nrm'] = {mat['no_perturbed_nrm']}")
+
         geometry, mat = optimize_mesh(
-            denoiser, glctx, glctx_display, geometry, mat, lgt, dataset_train, dataset_valid, FLAGS,
-            # pass_idx=pass_idx,
+            denoiser, glctx, glctx_display, geometry, mat, lgt, dataset_train, dataset_valid, FLAGS, 
+            log_interval=FLAGS.log_interval,
             pass_idx=1,
-            pass_name="mesh_pass2",
-            warmup_iter=100, # Use warmup to avoid nasty Adam spikes
+            pass_name="mesh_pass",
+            warmup_iter=100,
             optimize_light=not FLAGS.lock_light,
             optimize_geometry=not FLAGS.lock_pos,
-            log_interval=FLAGS.log_interval,
             phys_cam=phys_cam,
             defocus_net=defocus_net,
         )
-
+    
         # ==============================================================================================
         #  Validate
         # ==============================================================================================
@@ -1021,61 +1272,17 @@ if (FLAGS.base_mesh is None):
                 glctx_display, geometry, mat, lgt, dataset_valid, os.path.join(FLAGS.out_dir, "validate"), FLAGS, denoiser,
                 phys_cam=phys_cam, defocus_net=defocus_net,
             )
-
+    
         # ==============================================================================================
         #  Dump output
         # ==============================================================================================
         final_mesh = geometry.getMesh(mat)
-
+    
         os.makedirs(os.path.join(FLAGS.out_dir, "mesh"), exist_ok=True)
         obj.write_obj(os.path.join(FLAGS.out_dir, "mesh/"), final_mesh)
         if (lgt is not None):
-            light.save_env_map(os.path.join(FLAGS.out_dir, "mesh/probe.hdr"), lgt) 
-
+            light.save_env_map(os.path.join(FLAGS.out_dir, "mesh/probe.hdr"), lgt)
+    
         if (defocus_net is not None):
-            torch.save(defocus_net.state_dict(), os.path.join(FLAGS.out_dir, "dmtet_mesh/defocus_net_pass2.ckpt"))
-else:
-    # ==============================================================================================
-    #  Train with fixed topology (mesh)
-    # ==============================================================================================
+            torch.save(defocus_net.state_dict(), os.path.join(FLAGS.out_dir, "dmtet_mesh/defocus_net_pass.ckpt"))
 
-    # Load initial guess mesh from file
-    base_mesh = mesh.load_mesh(FLAGS.base_mesh)
-    geometry = DLMesh(base_mesh, FLAGS)
-    base_mesh.v_pos = base_mesh.v_pos.clone().detach().requires_grad_(True)
-
-    mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_mesh.material)
-
-    geometry, mat = optimize_mesh(
-        denoiser, glctx, glctx_display, geometry, mat, lgt, dataset_train, dataset_valid, FLAGS, 
-        log_interval=FLAGS.log_interval,
-        pass_idx=0,
-        pass_name="mesh_pass",
-        warmup_iter=0,
-        optimize_light=not FLAGS.lock_light,
-        optimize_geometry=not FLAGS.lock_pos,
-        phys_cam=phys_cam,
-        defocus_net=defocus_net,
-    )
-
-    # ==============================================================================================
-    #  Validate
-    # ==============================================================================================
-    if (FLAGS.validate):
-        validate(
-            glctx_display, geometry, mat, lgt, dataset_valid, os.path.join(FLAGS.out_dir, "validate"), FLAGS, denoiser,
-            phys_cam=phys_cam, defocus_net=defocus_net,
-        )
-
-    # ==============================================================================================
-    #  Dump output
-    # ==============================================================================================
-    final_mesh = geometry.getMesh(mat)
-
-    os.makedirs(os.path.join(FLAGS.out_dir, "mesh"), exist_ok=True)
-    obj.write_obj(os.path.join(FLAGS.out_dir, "mesh/"), final_mesh)
-    if (lgt is not None):
-        light.save_env_map(os.path.join(FLAGS.out_dir, "mesh/probe.hdr"), lgt)
-
-    if (defocus_net is not None):
-        torch.save(defocus_net.state_dict(), os.path.join(FLAGS.out_dir, "dmtet_mesh/defocus_net_pass.ckpt"))

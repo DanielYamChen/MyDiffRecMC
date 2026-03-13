@@ -18,6 +18,14 @@ from .loss import *
 #----------------------------------------------------------------------------
 # C++/Cuda plugin compiler/loader.
 
+cache_root = os.path.expanduser("~/.cache/torch_extensions")
+
+for root, dirs, files in os.walk(cache_root):
+    for f in files:
+        if f.startswith("renderutils_plugin") and f.endswith(".so"):
+            sys.path.insert(0, root)
+            break
+
 _cached_plugin = None
 def _get_plugin():
     # Return cached plugin if already loaded.

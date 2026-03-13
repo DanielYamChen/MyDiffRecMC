@@ -81,7 +81,7 @@ class DatasetCustom(Dataset):
         # self.data_dir = "train_imgs_part2/" if "train" in cfg_path else "test_imgs/"
 
         # Load camera config / transforms
-        if (self.dataset_name == "experiment"):
+        if ("RealScene" in self.dataset_name):
             if ("ground_added" in self.data_dir):
                 self.cfg = json.load(open(cfg_path[:-5] + "_ground_added.json", 'r'))
             
@@ -98,17 +98,17 @@ class DatasetCustom(Dataset):
         if (self.dataset_name == "custom"):
             ini_img_path = os.path.join(self.base_dir, self.data_dir, "img0000.png")
         
-        elif (self.dataset_name == "experiment"):
+        elif (self.dataset_name == "RealScene01"): 
             ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_180_polar_040_azi_000_U_middle_t_0128.png")
         
-        elif (self.dataset_name == "sim_scenes"):
+        elif ("SimScene" in self.dataset_name):
             # ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_000_polar_000_azi_000_U_middle_t_0128.png")
             paths = glob.glob(os.path.join(self.base_dir, self.data_dir, "*.png"))
             paths.sort()
             ini_img_path = paths[0]
         
         else:
-            assert(False), f"dataset_custom.py: unknown dataset name: {self.dataset_name}"
+            assert False, f"dataset_custom.py: unknown dataset name: {self.dataset_name}"
 
         self.resolutions = _load_img(ini_img_path).shape[0:2]
         self.aspect = self.resolutions[1] / self.resolutions[0]
@@ -129,8 +129,10 @@ class DatasetCustom(Dataset):
         # Load image and model-view matrix
         if (self.dataset_name == "custom"):
             img_path = os.path.join(self.base_dir, self.data_dir, "img" + str(idx).zfill(4) + ".png")
-        elif (self.dataset_name in ["experiment", "sim_scenes"]):
+        
+        elif(any(name in self.dataset_name for name in ["RealScene", "SimScene"])):
             img_path = os.path.join(self.base_dir, self.data_dir, cfg['frames'][str(idx)]["img_name"])
+        
         else:
             assert(False), f"dataset_custom.py: unknown dataset name: {self.dataset_name}"
 

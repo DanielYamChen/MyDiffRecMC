@@ -207,6 +207,17 @@ class DMTetGeometry:
         # Run DM tet to get a base mesh
         v_deformed = self.verts + 2 / (self.grid_res * 2) * torch.tanh(self.deform)
         verts, faces, uvs, uv_idx = marching_tets(v_deformed, self.sdf, self.indices)
+        
+        if faces.shape[0] == 0 or verts.shape[0] == 0:
+            with torch.no_grad():
+                num_pos = (self.sdf > 0).sum().item()
+                num_neg = (self.sdf <= 0).sum().item()
+                print("[DMTet] Empty mesh detected!")
+                print(f"[DMTet] sdf min={self.sdf.min().item():.6f}, max={self.sdf.max().item():.6f}, mean={self.sdf.mean().item():.6f}")
+                print(f"[DMTet] sdf > 0: {num_pos}, sdf <= 0: {num_neg}")
+            
+            raise RuntimeError("DMTet surface vanished: marching_tets returned empty mesh")
+        
         imesh = mesh.Mesh(verts, faces, v_tex=uvs, t_tex_idx=uv_idx, material=material)
 
         with torch.no_grad():
@@ -231,6 +242,18 @@ class DMTetGeometry:
         #         print(key, ":", batch_targets[key])
         #
         # assert (False)
+
+        # Debug
+        if (FLAGS.log_interval and (iteration % (2 * FLAGS.log_interval) == 0)):
+            with torch.no_grad():
+                print(
+                    f"[iter {iteration}] "
+                    f"sdf min={self.sdf.min().item():.6f}, "
+                    f"max={self.sdf.max().item():.6f}, "
+                    f"mean={self.sdf.mean().item():.6f}, "
+                    f"positive={(self.sdf > 0).sum().item()}, "
+                    f"negative={(self.sdf <= 0).sum().item()}"
+                )
 
         t_iter = iteration / FLAGS.iter
         color_ref = batch_targets['img']

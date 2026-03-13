@@ -28,6 +28,16 @@
 #include "common.h"
 #include "optix_wrapper.h"
 
+static void PrintOptixHeaderVersion() {
+    int v = OPTIX_VERSION;
+    int major = v / 10000;
+    int minor = (v % 10000) / 100;
+    int patch = v % 100;
+    std::cout << "OptiX header version: "
+              << major << "." << minor << "." << patch
+              << " (OPTIX_VERSION=" << v << ")\n";
+}
+
 // NVRTC compiler options
 #define CUDA_NVRTC_OPTIONS  \
   "-std=c++11", \
@@ -74,6 +84,8 @@ static void getCuStringFromFile( std::string& cu, const char* filename )
 static void getPtxFromCuString( std::string& ptx, const char* include_dir, const char* optix_include_dir, const char* cuda_include_dir, const char* cu_source, 
     const char* name, const char** log_string )
 {
+    PrintOptixHeaderVersion();
+    
     // Create program
     nvrtcProgram prog = 0;
     NVRTC_CHECK_ERROR( nvrtcCreateProgram( &prog, cu_source, name, 0, NULL, NULL ) );

@@ -15,6 +15,14 @@ import torch.utils.cpp_extension
 #----------------------------------------------------------------------------
 # C++/Cuda plugin compiler/loader.
 
+cache_root = os.path.expanduser("~/.cache/torch_extensions")
+
+for root, dirs, files in os.walk(cache_root):
+    for f in files:
+        if f.startswith("optixutils_plugin") and f.endswith(".so"):
+            sys.path.insert(0, root)
+            break
+
 _plugin = None
 if _plugin is None:
 
@@ -40,6 +48,7 @@ if _plugin is None:
 
     elif os.name == 'posix':
         optix_include_dir = os.path.dirname(__file__) + r"/include"
+        # optix_include_dir = "/home/bohsun/Software/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64/include"
 
     include_paths = [optix_include_dir]
 

@@ -9,7 +9,7 @@
     "train_res" : [768, 1024],
     "defocus_tensor_res" : [768, 1024],
     "batch_size" : 1,
-    "learning_rate" : [0.0250, 0.0030],
+    "learning_rate" : [0.0250, 0.0150],
     "dmtet_grid" : 256,
     "mesh_offset" : [0, 0, 0],
     "validate" : true,

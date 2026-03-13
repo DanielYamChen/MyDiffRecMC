@@ -96,25 +96,72 @@ class DLMesh:
         reg_loss = torch.tensor([0], dtype=torch.float32, device="cuda")
 
         # Monochrome shading regularizer
-        reg_loss += regularizer.shading_loss(buffers['diffuse_light'], buffers['specular_light'], color_ref, FLAGS.lambda_diffuse, FLAGS.lambda_specular)
+        reg_loss_shading = regularizer.shading_loss(buffers['diffuse_light'], buffers['specular_light'], color_ref, FLAGS.lambda_diffuse, FLAGS.lambda_specular)
 
         # Material smoothness regularizer
-        reg_loss += regularizer.material_smoothness_grad(buffers['kd_grad'], buffers['ks_grad'], buffers['normal_grad'], lambda_kd=self.FLAGS.lambda_kd, lambda_ks=self.FLAGS.lambda_ks, lambda_nrm=self.FLAGS.lambda_nrm)
+        reg_loss_smooth = regularizer.material_smoothness_grad(buffers['kd_grad'], buffers['ks_grad'], buffers['normal_grad'], lambda_kd=self.FLAGS.lambda_kd, lambda_ks=self.FLAGS.lambda_ks, lambda_nrm=self.FLAGS.lambda_nrm)
 
         # Chroma regularizer
-        reg_loss += regularizer.chroma_loss(buffers['kd'], color_ref, self.FLAGS.lambda_chroma)
+        reg_loss_chroma = regularizer.chroma_loss(buffers['kd'], color_ref, self.FLAGS.lambda_chroma)
 
         # Perturbed normal regularizer
+        reg_loss_perturbed = torch.tensor([0], dtype=torch.float32, device="cuda")
         if 'perturbed_nrm_grad' in buffers:
-            reg_loss += torch.mean(buffers['perturbed_nrm_grad']) * FLAGS.lambda_nrm2
+            reg_loss_perturbed = torch.mean(buffers['perturbed_nrm_grad']) * FLAGS.lambda_nrm2
 
-        # Laplacian regularizer. 
+        # Laplacian regularizer
+        reg_loss_laplace = torch.tensor([0], dtype=torch.float32, device="cuda")
         if (self.FLAGS.laplace == "absolute"):
-            reg_loss += regularizer.laplace_regularizer_const(self.mesh.v_pos, self.mesh.t_pos_idx) * FLAGS.laplace_scale * (1 - t_iter)
+            reg_loss_laplace = regularizer.laplace_regularizer_const(self.mesh.v_pos, self.mesh.t_pos_idx) * FLAGS.laplace_scale * (1 - t_iter)
         
         elif (self.FLAGS.laplace == "relative"):
-            reg_loss += regularizer.laplace_regularizer_const(self.mesh.v_pos - self.initial_guess.v_pos, self.mesh.t_pos_idx) * FLAGS.laplace_scale * (1 - t_iter)                
+            reg_loss_laplace = regularizer.laplace_regularizer_const(self.mesh.v_pos - self.initial_guess.v_pos, self.mesh.t_pos_idx) * FLAGS.laplace_scale * (1 - t_iter)                
+
+
+        reg_loss += reg_loss_shading + reg_loss_smooth + reg_loss_chroma + reg_loss_perturbed + reg_loss_laplace
 
         reg_loss *= 0.1
-        
+
+        if (FLAGS.log_interval and (iteration % (1 * FLAGS.log_interval) == 0)):
+            def _scalar_str(x):
+                if torch.isfinite(x).all():
+                    return f"{x.item():.6f}"
+                return "nan/inf"
+
+            print()
+            print(
+                f"[Iter {iteration}] "
+                f"reg_loss_shading={_scalar_str(reg_loss_shading)}, "
+                f"reg_loss_smooth={_scalar_str(reg_loss_smooth)}, "
+                f"reg_loss_chroma={_scalar_str(reg_loss_chroma)}, "
+                f"reg_loss_perturbed={_scalar_str(reg_loss_perturbed)}, "
+                f"reg_loss_laplace={_scalar_str(reg_loss_laplace)}, "
+                f"reg_loss={_scalar_str(reg_loss)}"
+            )
+
+            for name in ['kd', 'ks', 'normal', 'kd_grad', 'ks_grad', 'normal_grad',
+                 'diffuse_light', 'specular_light', 'shaded']:
+                if name in buffers:
+                    t = buffers[name]
+                    finite = torch.isfinite(t).all().item()
+                    t2 = torch.nan_to_num(t)
+                    print(
+                        f"[Iter {iteration}] {name}: "
+                        f"finite={finite}, "
+                        f"min={t2.min().item():.6f}, "
+                        f"max={t2.max().item():.6f}"
+                    )
+
+            if 'perturbed_nrm_grad' in buffers:
+                t = buffers['perturbed_nrm_grad']
+                t2 = torch.nan_to_num(t)
+                print(
+                    f"[Iter {iteration}] perturbed_nrm_grad: "
+                    f"finite={torch.isfinite(t).all().item()}, "
+                    f"min={t2.min().item():.6f}, "
+                    f"max={t2.max().item():.6f}"
+                )
+
+            print()
+
         return img_loss, reg_loss

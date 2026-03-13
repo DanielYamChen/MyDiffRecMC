@@ -44,7 +44,7 @@ defocus_type = args.defocus_type
 phys_cam_model_path = "../models/cam_model.py"
 phys_cam_model_params_path = f"../../CameraCalibrateExp/phys_cam_model_params_defocus_{defocus_type}.json"
 depth_map_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/depth_maps_wo_ground/"
-dst_defocus_matrix_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/defocus_matrices_{defocus_type}_wo_ground_v2/"
+dst_defocus_matrix_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/defocus_matrices_{defocus_type}_wo_ground/"
 
 #### General parameters ####
 defocus_name_suffix_dict = {
@@ -140,9 +140,13 @@ phys_cam = my_modules.PhysDiffCamera(img_h, img_w, torch_random_seed, 'cuda')
 with open(phys_cam_model_params_path) as json_file:
     cam_params = json.load(json_file)
 
+### Customized camera model parameters for inverse rendering ###
 noise_params = cam_params["noise_params"]
 noise_params["noise_gains"] = noise_amp * np.array(noise_params["noise_gains"], dtype=float)
 noise_params["STD_reads"] = noise_amp * np.array(noise_params["STD_reads"], dtype=float)
+
+gain_params = cam_params["gain_params"]
+gain_params["max_CoC"] = 15
 
 ## Lens parameters (Arducam LN042 5mm lens)
 # focal_length = cam_params["focal_length"] # [m]
@@ -166,7 +170,7 @@ phys_cam.SetModelParameters(
     cam_params["pixel_size"], # [m],
     max_scene_light,
     np.array(cam_params["rgb_QEs"], dtype=float),
-    cam_params["gain_params"],
+    gain_params,
     noise_params
 )
 
@@ -204,7 +208,7 @@ for sun_azi in sun_azis:
                     kernel_type=defocus_type,
                 )
                 defocus_matrix = defocus_matrix.detach().cpu()
-                defocus_D_map = defocus_D_map.astype(float) / defocus_D_map.max()
+                defocus_D_map = defocus_D_map.astype(float) / gain_params["max_CoC"]
                 defocus_D_map = cv2.resize(defocus_D_map, (img_w, img_h), cv2.INTER_LINEAR)
                 
                 defocus_matrix_path = os.path.join(dst_defocus_matrix_dir, depth_map_name[6:-4] + defocus_name_suffix_dict["wo_ground"] + ".npz")
