@@ -98,30 +98,6 @@ focus_dist_dicts = [ # [m]
     {"far": 1.73961093, "near": 0.58461093},
 ]
 
-def erode_depth_mask(depth, erosion_size=3, iterations=1):
-    """
-    depth: float32 depth map
-    erosion_size: structuring element size
-    iterations: erosion iterations
-
-    return:
-        eroded_mask
-        boundary_band
-    """
-
-    # 1. 用 depth > 0 當 mask
-    mask = (depth > 0).astype(np.uint8)
-
-    # 2. 建立 erosion kernel
-    kernel = np.ones((erosion_size, erosion_size), np.uint8)
-
-    # 3. erosion
-    eroded_mask = cv2.erode(mask, kernel, iterations=iterations)
-
-    # 4. boundary band (被 erosion 吃掉的那圈)
-    boundary_band = mask - eroded_mask
-
-    return eroded_mask, boundary_band
 
 ######################
 ######## MAIN ########
@@ -194,8 +170,7 @@ for sun_azi in sun_azis:
                     continue
                 
                 assert (depth_map.shape[0] == defocus_map_h and depth_map.shape[1] == defocus_map_w)
-                eroded_mask, boundary_band = erode_depth_mask(depth_map, erosion_size=3, iterations=1)
-                depth_map[eroded_mask == 0] = 0. # set depth to 0 for pixels in the boundary band (to avoid noisy depth values near object boundaries)
+                
                 defocus_matrix, defocus_D_map = phys_cam.GetSparseTensor(
                     depth_map,
                     {

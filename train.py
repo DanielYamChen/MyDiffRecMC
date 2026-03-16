@@ -811,8 +811,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip_pass1", action='store_true', help="Whether to skip the first pass of optimization and directly load the pass-1 checkpoint")
     parser.add_argument("--add_phys_cam", action='store_true', help="Whether to add the physics-based camera model into the optimization")
     parser.add_argument("--save_gt_test_imgs", action='store_true', help="Whether to save ground truth test images for visual comparison")
-    parser.add_argument('--defocus_type', type=str, default=None, help="which defocus type to run: gaussian or uniform")
-    parser.add_argument('--cond', type=str, default=None, help="which condition of using the physics-based camera: full, wo_expsr_related, wo_defocus")
+    parser.add_argument('--defocus_type', type=str, default=None, help="which defocus type to run: gaussian, uniform")
+    parser.add_argument('--cond', type=str, default=None, help="which condition of using the physics-based camera: full, wo_expsr, wo_defocus")
     
     FLAGS = parser.parse_args()
     
@@ -985,7 +985,7 @@ if __name__ == "__main__":
                 "add_noise": False,
                 "expsr2dv": True,
             }
-        elif (FLAGS.cond == "wo_expsr_related"):
+        elif (FLAGS.cond == "wo_expsr"):
             phys_cam.artifact_switches = {
                 "vignetting": False,
                 "defocus_blur": True,
