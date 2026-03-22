@@ -468,6 +468,8 @@ def render_mesh(
 
     if (FLAGS.add_phys_cam == False or phys_cam.artifact_switches["aggregate"] == False):
         for img_idx in range(len(out_buffers['shaded'])):
+            if (batch_cam_ctrl_params[img_idx, 0] > 0.):
+                out_buffers['shaded'][img_idx, :, :, 0 : 3] /= (batch_cam_ctrl_params[img_idx, 0] / 2.0)**2
             if (batch_cam_ctrl_params[img_idx, 1] > 0.):
                 out_buffers['shaded'][img_idx, :, :, 0 : 3] *= (batch_cam_ctrl_params[img_idx, 1] / 0.256)
 
