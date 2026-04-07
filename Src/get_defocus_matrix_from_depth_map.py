@@ -46,12 +46,19 @@ phys_cam_model_params_path = f"../../CameraCalibrateExp/phys_cam_model_params_de
 depth_map_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/depth_maps_wo_ground/"
 dst_defocus_matrix_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/defocus_matrices_{defocus_type}_wo_ground/"
 
-#### General parameters ####
-defocus_name_suffix_dict = {
-    "wo_ground": "_separatedobjs_all",
-    "ground_added": "_sugar",
-}
+### Customized camera model parameters for inverse rendering ###
+max_CoC = 15
+# obj_scale = 0.282051
+if (scene == "RealScene01"):
+    focal_length = 0.00572951691782118 # [m]
+    hFOV = 1.1278099154119037 # [rad]
 
+elif (scene == "RealScene02"):
+    focal_length = 0.0057094403074227179 # [m]
+    hFOV = 1.1556226234962288 # [rad]
+    
+
+#### General parameters ####
 img_w = 1024 # [px]
 img_h = 768 # [px]
 
@@ -63,41 +70,96 @@ torch_random_seed = 1234
 max_scene_light = 1080 # [lux = lumen/m^2]
 noise_amp = 0.40
 
+if (args.scene == "RealScene01"):
 
-#### Scene and camera setting parameters ####
-sun_azis = [ # [deg]
-    "180",
-    "270",
-]
-polar_angles = [ # [deg]
-    40,
-    55,
-    70,
-    85,
-]
-num_polar_angles = len(polar_angles)
+    defocus_name_suffix_dict = {
+        "wo_ground": "_separatedobjs_all",
+        "ground_added": "_sugar",
+    }
 
-num_azi_angles_list = [
-    24,
-    18,
-    18,
-    18,
-]
+    #### Scene and camera setting parameters ####
+    sun_azis = [ # [deg]
+        "180",
+        "270",
+    ]
+    polar_angles = [ # [deg]
+        40,
+        55,
+        70,
+        85,
+    ]
+    num_polar_angles = len(polar_angles)
 
-aperture_nums = [
-    2.8,
-    2.8,
-    2.0,
-    2.0
-]
+    num_azi_angles_list = [
+        24,
+        18,
+        18,
+        18,
+    ]
 
-focus_dist_dicts = [ # [m]
-    {"middle": 1.51135607},
-    {"middle": 1.18595926},
-    {"far": 1.67369843, "near": 0.51869843},
-    {"far": 1.73961093, "near": 0.58461093},
-]
+    start_azi_angle_dict = { # [deg]
+        "180": 0,
+        "270": 0,
+    }
 
+    aperture_nums = [
+        2.8,
+        2.8,
+        2.0,
+        2.0
+    ]
+
+    focus_dist_dicts = [ # [m]
+        {"middle": 1.51135607},
+        {"middle": 1.18595926},
+        {"far": 1.67369843, "near": 0.51869843},
+        {"far": 1.73961093, "near": 0.58461093},
+    ]
+
+elif (args.scene == "RealScene02"):
+    defocus_name_suffix_dict = {
+        "wo_ground": "_VGGT_NoGround",
+    }
+    
+    #### Scene and camera setting parameters ####
+    sun_azis = [ # [deg]
+        "180",
+        "300",
+    ]
+    polar_angles = [ # [deg]
+        45,
+        55,
+        70,
+        85,
+    ]
+    num_polar_angles = len(polar_angles)
+
+    num_azi_angles_list = [
+        18,
+        18,
+        18,
+        18,
+    ]
+
+    start_azi_angle_dict = { # [deg]
+        "180": 0,
+        "300": 10,
+        "No": 0,
+    }
+
+    aperture_nums = [
+        2.8,
+        2.8,
+        2.0,
+        2.0
+    ]
+
+    focus_dist_dicts = [ # [m]
+        {"middle": 2.7577},
+        {"middle": 2.3805},
+        {"far": 3.1737, "near": 1.1390},
+        {"far": 3.0750, "near": 0.8250},
+    ]
 
 ######################
 ######## MAIN ########
@@ -116,20 +178,17 @@ phys_cam = my_modules.PhysDiffCamera(img_h, img_w, torch_random_seed, 'cuda')
 with open(phys_cam_model_params_path) as json_file:
     cam_params = json.load(json_file)
 
-### Customized camera model parameters for inverse rendering ###
 noise_params = cam_params["noise_params"]
 noise_params["noise_gains"] = noise_amp * np.array(noise_params["noise_gains"], dtype=float)
 noise_params["STD_reads"] = noise_amp * np.array(noise_params["STD_reads"], dtype=float)
 
 gain_params = cam_params["gain_params"]
-gain_params["max_CoC"] = 15
+gain_params["max_CoC"] = max_CoC
 
 ## Lens parameters (Arducam LN042 5mm lens)
 # focal_length = cam_params["focal_length"] # [m]
 # hFOV = cam_params["hFOV"] * pi / 180.0 # [rad]
-# obj_scale = 0.282051
-focal_length = 0.00572951691782118 # [m]
-hFOV = 1.1278099154119037 # [rad]
+
 sensor_width = 2 * focal_length * np.tan(hFOV / 2) # [m]
 
 phys_cam.BuildVignetMask(sensor_width, focal_length) 
@@ -161,12 +220,13 @@ for sun_azi in sun_azis:
     for polar_idx in range(num_polar_angles):
         polar_angle = polar_angles[polar_idx]
         for azi_idx in range(num_azi_angles_list[polar_idx]):
-            azi_angle = 360 * (azi_idx) // num_azi_angles_list[polar_idx]
+            azi_angle = start_azi_angle_dict[sun_azi] + 360 * (azi_idx) // num_azi_angles_list[polar_idx] # [deg]
             for focus_dist_key, focus_dist in focus_dist_dicts[polar_idx].items():
                 
                 depth_map_name = f"depth_sun_{sun_azi}_polar_{polar_angle:03d}_azi_{azi_angle:03d}_U_{focus_dist_key}.exr"
                 depth_map = cv2.imread(os.path.join(depth_map_dir, depth_map_name), cv2.IMREAD_UNCHANGED)
                 if depth_map is None:
+                    print(f"Skipped reading {os.path.join(depth_map_dir, depth_map_name)}")
                     continue
                 
                 assert (depth_map.shape[0] == defocus_map_h and depth_map.shape[1] == defocus_map_w)

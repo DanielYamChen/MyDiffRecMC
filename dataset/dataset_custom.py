@@ -100,6 +100,9 @@ class DatasetCustom(Dataset):
         
         elif (self.dataset_name == "RealScene01"): 
             ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_180_polar_040_azi_000_U_middle_t_0128.png")
+
+        elif (self.dataset_name == "RealScene02"): 
+            ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_180_polar_045_azi_000_U_middle_t_0120.png")
         
         elif ("SimScene" in self.dataset_name):
             # ini_img_path = os.path.join(self.base_dir, self.data_dir, "sun_000_polar_000_azi_000_U_middle_t_0128.png")

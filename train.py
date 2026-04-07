@@ -813,7 +813,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_gt_test_imgs", action='store_true', help="Whether to save ground truth test images for visual comparison")
     parser.add_argument('--defocus_type', type=str, default=None, help="which defocus type to run: gaussian, uniform")
     parser.add_argument('--cond', type=str, default=None, help="which condition of using the physics-based camera: full, wo_expsr, wo_defocus")
-    
+    parser.add_argument('--learning_rate', type=float, nargs=2, default=[0., 0.], help="Learning rate for optimization.")
+
     FLAGS = parser.parse_args()
     
     # FLAGS.scene = "RealScene01"
@@ -928,10 +929,16 @@ if __name__ == "__main__":
     if (FLAGS.add_phys_cam):
         
         assert(FLAGS.cond is not None), "Condition for using the physics-based camera is not specified ..."
-        assert(FLAGS.defocus_type is not None), "defocus_type for using the physics-based camera is not specified ..."
+
+        if (FLAGS.cond != "wo_defocus"):
+            assert(FLAGS.defocus_type is not None), "defocus_type for using the physics-based camera is not specified ..."
     
         #### Paths ####
-        phys_cam_model_params_path = f"../CameraCalibrateExp/phys_cam_model_params_defocus_{FLAGS.defocus_type}.json"
+        if (FLAGS.cond != "wo_defocus"):
+            phys_cam_model_params_path = f"../CameraCalibrateExp/phys_cam_model_params_defocus_{FLAGS.defocus_type}.json"
+        else:
+            phys_cam_model_params_path = f"../CameraCalibrateExp/phys_cam_model_params_defocus_gaussian.json"
+            
         FLAGS.defocus_mtrx_base_dir = f"../DiffPhysCam_Data/NovelViewSynthesis_Data/{FLAGS.scene}/defocus_matrices_{FLAGS.defocus_type}_wo_ground/"
     
         noise_amp = 0.40
@@ -952,20 +959,35 @@ if __name__ == "__main__":
         noise_params["noise_gains"] = noise_amp * np.array(noise_params["noise_gains"], dtype=float)
         noise_params["STD_reads"] = noise_amp * np.array(noise_params["STD_reads"], dtype=float)
         
-    
-        ## Lens parameters (Arducam LN042 5mm lens)
-        focal_length = 0.00572951691782118 # [m]
-        hFOV = 1.1278099154119037 # [rad]
-        sensor_width = 2 * focal_length * np.tan(hFOV / 2) # [m]
-    
         if (FLAGS.scene == "RealScene01"):
             print("customized cam model params for Real Scene 1 ....")
+
+            ## Lens parameters (Arducam LN042 5mm lens)
+            focal_length = 0.00572951691782118 # [m]
+            hFOV = 1.1278099154119037 # [rad]
+
             max_scene_light = 10000 * 0.10 / np.sum(np.array([0.825, 0., 0.825])**2) # [lux = lumen/m^2]
             # max_scene_light = 1080 # [lux = lumen/m^2]
+
+            FLAGS.validate_num = 112
+
+        elif (FLAGS.scene == "RealScene02"):
+            print("customized cam model params for Real Scene 2 ....")
+
+            ## Lens parameters (Arducam LN042 5mm lens)
+            focal_length = 0.005641539774724099 # [m]
+            hFOV = 1.1475922691663856 # [rad]
+
+            max_scene_light = 10000 * 0.10 / np.sum(np.array([0.825, 0., 0.825])**2) # [lux = lumen/m^2]
+            # max_scene_light = 1080 # [lux = lumen/m^2]
+
+            FLAGS.validate_num = 186
     
         elif ("SimScene" in FLAGS.scene):
             max_scene_light = 400        
     
+        sensor_width = 2 * focal_length * np.tan(hFOV / 2) # [m]
+
         phys_cam.SetModelParameters(sensor_width, pixel_size, max_scene_light, rgb_QEs, gain_params, noise_params)
         phys_cam.BuildVignetMask(sensor_width, focal_length) 
         
@@ -1008,11 +1030,14 @@ if __name__ == "__main__":
     
     ## log
     if (FLAGS.add_phys_cam):
+        print()
         print("phys_cam added:")
         for key in phys_cam.artifact_switches.keys():
             print(f"{key} : {phys_cam.artifact_switches[key]}")
+
+        print()
     
-    #### set up random seed
+    #### Set up random seed
     random.seed(FLAGS.rand_seed)
     np.random.seed(FLAGS.rand_seed)
     torch.manual_seed(FLAGS.rand_seed)
@@ -1032,7 +1057,7 @@ if __name__ == "__main__":
         
         elif (any(sub in FLAGS.ref_mesh.split(os.sep)[-2] for sub in ['custom', 'RealScene', 'SimScene'])):
             dataset_train = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_train.json'), FLAGS, num_samples=(FLAGS.iter + 1) * FLAGS.batch_size)
-            dataset_valid = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_test.json'), FLAGS, num_samples=FLAGS.validate_num)
+            dataset_valid = DatasetCustom(os.path.join(FLAGS.ref_mesh, 'trnsfrms_and_configs_test.json'), FLAGS, num_samples=None)
         
         elif (os.path.isfile(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'))  and not os.path.isfile(os.path.join(FLAGS.ref_mesh, 'intrinsics.txt'))):
             dataset_train = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'), FLAGS, num_samples=(FLAGS.iter + 1) * FLAGS.batch_size)

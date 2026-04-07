@@ -19,14 +19,15 @@ import importlib.util
 import sys
 import json
 
-from render import util
-from render import mesh
-from render import render
-from render import light
-import render.optixutils as ou
+# from render import util
+# from render import mesh
+# from render import render
+# from render import light
+# import render.optixutils as ou
 
 # cond = "simulation"
-cond = "experiment"
+# cond = "RealScene01"
+cond = "RealScene02"
 
 save_envlgt = 1
 viz = 1
@@ -39,13 +40,13 @@ if (cond == "simulation"):
     # chrono_img_path = "/home/bohsun/UW_Madison/Research/CameraCalibrateExp/Data/Synth/ENVLIGHT_PNG/ambient_calibrate_Kd_0.5_rough_1.0_metallic_0.png"
     # chrono_img_path = "/home/bohsun/UW_Madison/Research/CameraCalibrateExp/Data/Synth/ENVLIGHT_PNG/point_calibrate_Kd_0.2_rough_0.4_metallic_0.png"
     chrono_img_path = "/home/bohsun/UW_Madison/Research/CameraCalibrateExp/Data/Synth/ENVLIGHT_PNG/all_light_calibrate.png"
-    dst_envmap_dir = "./data/custom/envmaps/" # base directory for saving environment maps
+    dst_envmap_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{cond}/envmaps/" # base directory for saving environment maps
 
     phys_cam = None
     cam_ctrl_params = [0., 0., 0., 0., 0.]
     point_light_color = [1.0, 1.0, 1.0]
 
-elif (cond == "experiment"):
+elif ('RealScene' in cond):
     # obj_path = "/home/bohsun/UW_Madison/Research/TextureMaterial/calibrate_paper/calibrate_paper.obj"
     obj_path = "/home/bohsun/UW_Madison/Research/MyDiffRecMC/out/experiment/mesh/mesh.obj"
     envlight_path = "/home/bohsun/UW_Madison/Research/MyDiffRecMC/data/experiment/envmaps/envmap_000_045_nvDiffRec_exp.hdr"
@@ -55,7 +56,7 @@ elif (cond == "experiment"):
     # photo_path = "/home/bohsun/UW_Madison/Research/DiffCamExp/ExpData/Direct_PNG/N_020_ISO_00_t_0016.png"
     photo_path = "/home/bohsun/UW_Madison/Research/DiffCamExp/ExpData/Direct_PNG/N_020_ISO_00_t_0032.png"
     
-    dst_envmap_dir = "./data/experiment/envmaps/" # base directory for saving environment maps
+    dst_envmap_dir = f"/home/bohsun/UW_Madison/Research/DiffPhysCam_Data/NovelViewSynthesis_Data/{cond}/env_maps/" # base directory for saving environment maps
     
     # cam_ctrl_params = [2.0, int(photo_path[-8:-4]) / 1000.0, 100.0, 0.005, 0]
     cam_ctrl_params = [2.0, 0.128, 100.0, 0.005, 0]
@@ -66,7 +67,7 @@ img_w = 1024
 aspect = img_w / img_h
 fov_x = 64.61874824610845 * pi/180.0 # [rad]
 # fov_x = 55.7 * pi/180.0 # [rad]
-fov_y = util.fovx_to_fovy(fov_x, aspect)
+# fov_y = util.fovx_to_fovy(fov_x, aspect)
 # fov_y = pi/3
 cam_near_far = [0.0001, 1e8] # [m]
 
@@ -151,7 +152,7 @@ cam_trnsfrm = torch.tensor([ # experiment directional light, in Mitsuba format
 # ], dtype=torch.float32)
 
 light_angle_list = [ # (azimuth, polar), [deg]
-    [0, 45], # for calibrating
+    # [0, 45], # for calibrating
     # [0, 45],
     # [90, 45],
     # [180, 45],
@@ -160,6 +161,8 @@ light_angle_list = [ # (azimuth, polar), [deg]
     # [315, 82],
     # [180, 45],
     # [270, 45],
+    [180, 49], # RealScene02
+    [300, 49], # RealScene02
 ]
 
 #############################
@@ -208,29 +211,29 @@ def CreateDirectLightEnvmap(azimuth, polar, light_color, amb_lgt_intensity, file
 ###########################
 #### Function set ends ####
 ###########################
-ref_mesh = mesh.load_mesh(obj_path, None)
+# ref_mesh = mesh.load_mesh(obj_path, None)
 
-print("Build Optix bvh")
-optix_ctx = ou.OptiXContext()
-ou.optix_build_bvh(optix_ctx, ref_mesh.v_pos, ref_mesh.t_pos_idx.int(), rebuild=1)
-print("Done building OptiX bvh")
+# print("Build Optix bvh")
+# optix_ctx = ou.OptiXContext()
+# ou.optix_build_bvh(optix_ctx, ref_mesh.v_pos, ref_mesh.t_pos_idx.int(), rebuild=1)
+# print("Done building OptiX bvh")
 
-glctx = dr.RasterizeGLContext() # Context for training
+# glctx = dr.RasterizeGLContext() # Context for training
 
 iter_res = [img_h, img_w]
 
-proj = util.perspective(fov_y, aspect, cam_near_far[0], cam_near_far[1])
+# proj = util.perspective(fov_y, aspect, cam_near_far[0], cam_near_far[1])
 
-if (cond == "simulation"):
-    cam_trnsfrm = (util.rotate_x(np.pi / 2) @ cam_trnsfrm) @ util.rotate_y(np.pi)
-elif (cond == "experiment"):
-    cam_trnsfrm = util.rotate_y(-np.pi/2) @ ((util.rotate_x(np.pi / 2) @ cam_trnsfrm) @ util.rotate_y(np.pi))
+# if (cond == "simulation"):
+#     cam_trnsfrm = (util.rotate_x(np.pi / 2) @ cam_trnsfrm) @ util.rotate_y(np.pi)
+# elif (cond == "experiment"):
+#     cam_trnsfrm = util.rotate_y(-np.pi/2) @ ((util.rotate_x(np.pi / 2) @ cam_trnsfrm) @ util.rotate_y(np.pi))
 
-model_view_trnsfrm = np.linalg.inv(cam_trnsfrm) # 4 x 4 matrix
-cam_posi = cam_trnsfrm[:3, 3]
-mvp_trnsfrm = proj @ model_view_trnsfrm
-mvp_trnsfrm = mvp_trnsfrm[None, ...].to('cuda')
-cam_posi = cam_posi[None, ...].to('cuda')
+# model_view_trnsfrm = np.linalg.inv(cam_trnsfrm) # 4 x 4 matrix
+# cam_posi = cam_trnsfrm[:3, 3]
+# mvp_trnsfrm = proj @ model_view_trnsfrm
+# mvp_trnsfrm = mvp_trnsfrm[None, ...].to('cuda')
+# cam_posi = cam_posi[None, ...].to('cuda')
 
 # ambient_light_amount = 0.288 # for Scenes 1 and 3
 # point_light_amount = 2375 # for Scenes 1 and 3
@@ -240,13 +243,15 @@ cam_posi = cam_posi[None, ...].to('cuda')
 
 # ambient_light_amount = 0.57 # for experiment, t = 0.064 sec
 # ambient_light_amount = 0.64 # for experiment, t = 0.128 sec
-ambient_light_amount = 0.61 # for experiment
+# ambient_light_amount = 0.609375 # RealScene01
+ambient_light_amount = 0.609375 * 4.6050 # RealScene02
 # ambient_light_amount = 0.61 * 2.4 # for experiment
 # ambient_light_amount = 1.0 # for experiment, heuristics
 
 # point_light_amount = 5080 # for experiment, t = 0.016 sec
 # point_light_amount = 5220 # for experiment, t = 0.032 sec
-point_light_amount = 5150 # for experiment
+# point_light_amount = 5120 # RealScene01
+point_light_amount = 5120 * 0.8056 # RealScene02
 # point_light_amount = 5150 * 0.57 # for experiment
 # point_light_amount = 2000.0 # for experiment, heuristics
 
@@ -266,7 +271,7 @@ for round_idx in range(num_rounds):
                 map_path_prefix + "_nvDiffRec_exp.hdr" if save_envlgt else None,
             )
     
-    
+    """
     new_ref_mesh = mesh.compute_tangents(ref_mesh)
     envlight = light.load_env(envlight_path, scale=1.0)
     
@@ -334,6 +339,8 @@ for round_idx in range(num_rounds):
         # mean_nv_img = np.mean(nv_img[nv_img > 0.4])
         # point_light_amount *= mean_chrono_img / mean_nv_img
         # print(f"new point_light_amount = {point_light_amount:.4f}")
+    """
+    
     '''
     elif (cond == "experiment"):
         photo = cv2.imread(photo_path, cv2.IMREAD_UNCHANGED)
