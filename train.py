@@ -969,8 +969,6 @@ if __name__ == "__main__":
             max_scene_light = 10000 * 0.10 / np.sum(np.array([0.825, 0., 0.825])**2) # [lux = lumen/m^2]
             # max_scene_light = 1080 # [lux = lumen/m^2]
 
-            FLAGS.validate_num = 112
-
         elif (FLAGS.scene == "RealScene02"):
             print("customized cam model params for Real Scene 2 ....")
 
@@ -980,8 +978,6 @@ if __name__ == "__main__":
 
             max_scene_light = 10000 * 0.10 / np.sum(np.array([0.825, 0., 0.825])**2) # [lux = lumen/m^2]
             # max_scene_light = 1080 # [lux = lumen/m^2]
-
-            FLAGS.validate_num = 186
     
         elif ("SimScene" in FLAGS.scene):
             max_scene_light = 400        

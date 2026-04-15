@@ -125,6 +125,7 @@ elif (args.scene == "RealScene02"):
     sun_azis = [ # [deg]
         "180",
         "300",
+        # "No",
     ]
     polar_angles = [ # [deg]
         45,
@@ -139,6 +140,7 @@ elif (args.scene == "RealScene02"):
         18,
         18,
         18,
+        # 36, # RealScene02, sun_No
     ]
 
     start_azi_angle_dict = { # [deg]
@@ -159,6 +161,7 @@ elif (args.scene == "RealScene02"):
         {"middle": 2.3805},
         {"far": 3.1737, "near": 1.1390},
         {"far": 3.0750, "near": 0.8250},
+        # {"SuperFar": 3.30, "SuperNear": 0.3}, # RealScene02, sun_No
     ]
 
 ######################

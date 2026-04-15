@@ -56,7 +56,7 @@ elif ('RealScene' in cond):
     # photo_path = "/home/bohsun/UW_Madison/Research/DiffCamExp/ExpData/Direct_PNG/N_020_ISO_00_t_0016.png"
     photo_path = "/home/bohsun/UW_Madison/Research/DiffCamExp/ExpData/Direct_PNG/N_020_ISO_00_t_0032.png"
     
-    dst_envmap_dir = f"/home/bohsun/UW_Madison/Research/DiffPhysCam_Data/NovelViewSynthesis_Data/{cond}/env_maps/" # base directory for saving environment maps
+    dst_envmap_dir = f"/home/bohsun/UW_Madison/Research/DiffPhysCam_Data/NovelViewSynthesis_Data/{cond}/envmaps/" # base directory for saving environment maps
     
     # cam_ctrl_params = [2.0, int(photo_path[-8:-4]) / 1000.0, 100.0, 0.005, 0]
     cam_ctrl_params = [2.0, 0.128, 100.0, 0.005, 0]
@@ -161,8 +161,9 @@ light_angle_list = [ # (azimuth, polar), [deg]
     # [315, 82],
     # [180, 45],
     # [270, 45],
-    [180, 49], # RealScene02
-    [300, 49], # RealScene02
+    # [180, 49], # RealScene02
+    # [300, 49], # RealScene02
+    [0, 49], # RealScene02
 ]
 
 #############################
@@ -264,8 +265,8 @@ for round_idx in range(num_rounds):
             _ = CreateDirectLightEnvmap(
                 (270.0 - light_angle[0]) % 360.0 * pi/180.0, # convert to NVDiffRast EnvMap's azimuth angle
                 light_angle[1] * pi/180.0,
-                point_light_amount * np.array(point_light_color), # for simulations
-                # 0. * np.array([1.0, 1.0, 1.0]), # for calibrating ambient light
+                # point_light_amount * np.array(point_light_color), # for simulations
+                0. * np.array([1.0, 1.0, 1.0]), # for calibrating ambient light
                 ambient_light_amount, # for simulations
                 # 0., # 1for calibrating point light amount
                 map_path_prefix + "_nvDiffRec_exp.hdr" if save_envlgt else None,
