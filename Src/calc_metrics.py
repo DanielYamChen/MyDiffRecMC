@@ -43,16 +43,10 @@ defocus_type = args.defocus_type
 #### Derived parameters ####
 if (scene[:9] == "RealScene"):
     test_json_path = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/trnsfrms_and_configs_test_wo_ground.json"
-    gt_imgs_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/imgs_wo_ground/" 
-
 elif (scene[:8] == "SimScene"):
-    if (scene[-2:] in ["01", "03"]):
-        test_json_path = "../../DiffPhysCam_Data/NovelViewSynthesis_Data/SimScene_general/trnsfrms_and_configs_test_Scenes01and03.json"
-    
-    elif (scene[-2:] == "02"):
-        test_json_path = "../../DiffPhysCam_Data/NovelViewSynthesis_Data/SimScene_general/trnsfrms_and_configs_test_Scene02.json"
+    test_json_path = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/trnsfrms_and_configs_test.json"
 
-    gt_imgs_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/imgs_wo_ground/" 
+gt_imgs_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Data/{scene}/imgs_wo_ground/"  
 
 if ((scene[:9] == "RealScene") and (cond in ["full", "wo_expsr"])):
     synth_imgs_dir = f"../../DiffPhysCam_Data/NovelViewSynthesis_Output/{scene}_{cond}_defocus_{defocus_type}/validate/"

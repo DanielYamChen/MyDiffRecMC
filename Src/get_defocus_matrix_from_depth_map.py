@@ -56,7 +56,10 @@ if (scene == "RealScene01"):
 elif (scene == "RealScene02"):
     focal_length = 0.0057094403074227179 # [m]
     hFOV = 1.1556226234962288 # [rad]
-    
+
+elif ("SimScene" in scene):
+    focal_length = 0.005 # [m]
+    hFOV = 55.7 * pi / 180.0 # [rad]
 
 #### General parameters ####
 img_w = 1024 # [px]
@@ -70,7 +73,7 @@ torch_random_seed = 1234
 max_scene_light = 1080 # [lux = lumen/m^2]
 noise_amp = 0.40
 
-if (args.scene == "RealScene01"):
+if (scene == "RealScene01"):
 
     defocus_name_suffix_dict = {
         "wo_ground": "_separatedobjs_all",
@@ -116,7 +119,7 @@ if (args.scene == "RealScene01"):
         {"far": 1.73961093, "near": 0.58461093},
     ]
 
-elif (args.scene == "RealScene02"):
+elif (scene == "RealScene02"):
     defocus_name_suffix_dict = {
         "wo_ground": "_VGGT_NoGround",
     }
@@ -127,6 +130,7 @@ elif (args.scene == "RealScene02"):
         "300",
         # "No",
     ]
+
     polar_angles = [ # [deg]
         45,
         55,
@@ -162,6 +166,53 @@ elif (args.scene == "RealScene02"):
         {"far": 3.1737, "near": 1.1390},
         {"far": 3.0750, "near": 0.8250},
         # {"SuperFar": 3.30, "SuperNear": 0.3}, # RealScene02, sun_No
+    ]
+
+elif ("SimScene" in scene):
+
+    #### Scene and camera setting parameters ####
+    sun_azis = [ # [deg]
+        "",
+    ]
+
+    polar_angles = [ # [deg]
+        40,
+        55,
+        70,
+        85,
+         0,
+    ]
+    num_polar_angles = len(polar_angles)
+
+    num_azi_angles_list = [
+        20, 
+        24,
+        24,
+        30,
+         1, # top view
+    ]
+
+    start_azi_angle_dict = { # [deg]
+        "": 0,
+    }
+
+    aperture_nums = [
+        2.0,
+        2.0,
+        1.6,
+        1.6,
+        2.0,
+    ]
+
+    radius = 0.88 * 1.414 # [m]
+    focus_dist_dicts = [ # [m]
+        {"middle": radius},
+        {"middle": radius},
+        # {"near": 1.58, "far": 5.07},
+        # {"near": 1.77, "far": 5.27},
+        {"near": 0.52, "far": 1.67},
+        {"near": 0.58, "far": 1.74},
+        {"middle": radius},
     ]
 
 ######################
@@ -226,7 +277,12 @@ for sun_azi in sun_azis:
             azi_angle = start_azi_angle_dict[sun_azi] + 360 * (azi_idx) // num_azi_angles_list[polar_idx] # [deg]
             for focus_dist_key, focus_dist in focus_dist_dicts[polar_idx].items():
                 
-                depth_map_name = f"depth_sun_{sun_azi}_polar_{polar_angle:03d}_azi_{azi_angle:03d}_U_{focus_dist_key}.exr"
+                if ("RealScene" in scene):
+                    depth_map_name = f"depth_sun_{sun_azi}_polar_{polar_angle:03d}_azi_{azi_angle:03d}_U_{focus_dist_key}.exr"
+
+                elif ("SimScene" in scene):
+                    depth_map_name = f"depth_polar_{polar_angle:03d}_azi_{azi_angle:03d}.exr"
+
                 depth_map = cv2.imread(os.path.join(depth_map_dir, depth_map_name), cv2.IMREAD_UNCHANGED)
                 if depth_map is None:
                     print(f"Skipped reading {os.path.join(depth_map_dir, depth_map_name)}")
@@ -249,19 +305,28 @@ for sun_azi in sun_azis:
                 defocus_D_map = defocus_D_map.astype(float) / gain_params["max_CoC"]
                 defocus_D_map = cv2.resize(defocus_D_map, (img_w, img_h), cv2.INTER_LINEAR)
                 
-                defocus_matrix_path = os.path.join(dst_defocus_matrix_dir, depth_map_name[6:-4] + defocus_name_suffix_dict["wo_ground"] + ".npz")
+                if ("RealScene" in scene):
+                    defocus_matrix_path = os.path.join(dst_defocus_matrix_dir, depth_map_name[6:-4] + defocus_name_suffix_dict["wo_ground"] + ".npz")
+                
+                elif ("SimScene" in scene):
+                    defocus_matrix_path = os.path.join(dst_defocus_matrix_dir, depth_map_name[6:-4] + f"_U_{focus_dist_key}" + ".npz")
+
                 np.savez_compressed(
                     defocus_matrix_path,
                     indices=defocus_matrix.indices().numpy(),
                     values=defocus_matrix.values().numpy(),
                     shape=defocus_matrix.shape,
                 )
-                
-                defocus_D_map_path = os.path.join(dst_defocus_matrix_dir, "defocus_" + depth_map_name[6:-4] + ".png")
+                if ("RealScene" in scene):
+                    defocus_D_map_path = os.path.join(dst_defocus_matrix_dir, "defocus_" + depth_map_name[6:-4] + ".png")
+                    
+                elif ("SimScene" in scene):
+                    defocus_D_map_path = os.path.join(dst_defocus_matrix_dir, "defocus_" + depth_map_name[6:-4] + f"_U_{focus_dist_key}"  + ".png")
+
                 assert(cv2.imwrite(
-                        defocus_D_map_path,
-                        cv2.cvtColor((defocus_D_map * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-                    )), f"Failed to save {defocus_D_map_path}"
+                    defocus_D_map_path,
+                    cv2.cvtColor((defocus_D_map * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                )), f"Failed to save {defocus_D_map_path}"
                 
                 ## print log ##
                 matrix_idx += 1

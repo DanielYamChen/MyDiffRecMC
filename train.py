@@ -861,8 +861,8 @@ if __name__ == "__main__":
     FLAGS.decorrelated        = False       # Use decorrelated sampling in forward and backward passes
     FLAGS.kd_min              = [ 0.0,  0.0,  0.0,  0.0]
     FLAGS.kd_max              = [ 1.0,  1.0,  1.0,  1.0]
-    FLAGS.ks_min              = [ 0.0,  0.05, 0.0]
-    FLAGS.ks_max              = [ 0.0,  1.0,  1.0]
+    FLAGS.ks_min              = [ 0.0,  0.05, 0.00]
+    FLAGS.ks_max              = [ 0.0,  1.00, 1.00]
     FLAGS.nrm_min             = [-1.0, -1.0,  0.0]
     FLAGS.nrm_max             = [ 1.0,  1.0,  1.0]
     FLAGS.clip_max_norm       = 0.0
@@ -980,6 +980,11 @@ if __name__ == "__main__":
             # max_scene_light = 1080 # [lux = lumen/m^2]
     
         elif ("SimScene" in FLAGS.scene):
+            print("Customized cam model params for Sim Scenes ....")
+            
+            focal_length = 0.005 # [m]
+            hFOV = 55.7 * pi / 180.0 # [rad]
+
             max_scene_light = 400        
     
         sensor_width = 2 * focal_length * np.tan(hFOV / 2) # [m]
